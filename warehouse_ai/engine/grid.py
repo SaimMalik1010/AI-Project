@@ -1,18 +1,17 @@
-import numpy as np
+class Node:
+    def __init__(self, x, y, weight=1, walkable=True):
+        self.x = x
+        self.y = y
+        self.weight = weight   # Higher weight = congested area
+        self.walkable = walkable
+        self.parent = None     # For path reconstruction
+        self.g = 0             # Cost from start to this node
+        self.h = 0             # Heuristic (estimate to goal)
+        self.f = 0             # Total cost (g + h)
 
-class AIProcessor:
-    def __init__(self, model_instance=None):
-        self.model = model_instance
+    def __lt__(self, other):
+        return self.f < other.f
 
-    def process_input(self, raw_data):
-        """
-        Converts raw input into a format suitable for the model.
-        """
-        # Example: ensuring data is a 2D array
-        return np.array(raw_data).reshape(1, -1)
-
-    def get_decision_logic(self, processed_data):
-        """
-        Placeholder for custom logic if not using a standard library model.
-        """
-        pass
+    @property
+    def pos(self):
+        return (self.x, self.y)
