@@ -3,6 +3,8 @@ from django.db import models
 
 class WarehouseMap(models.Model):
 	name = models.CharField(max_length=120, default="Default Warehouse")
+	aisle_count = models.PositiveIntegerField(default=1)
+	shelves_per_aisle = models.PositiveIntegerField(default=1)
 	grid = models.JSONField(default=list)
 	created_at = models.DateTimeField(auto_now_add=True)
 

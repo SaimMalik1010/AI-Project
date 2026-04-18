@@ -300,6 +300,21 @@
   cursor: default;
 }
 
+.cell-path-1 {
+  background: #e11d48;
+  border-color: #fb7185;
+}
+
+.cell-path-2 {
+  background: #be123c;
+  border-color: #f43f5e;
+}
+
+.cell-path-3 {
+  background: #881337;
+  border-color: #e11d48;
+}
+
 .cell-path-current {
   transform: scale(1.08);
   box-shadow: 0 0 18px rgba(244, 63, 94, 0.7);

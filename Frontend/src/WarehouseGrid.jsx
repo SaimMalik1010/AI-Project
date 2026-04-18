@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { getOptimalRoute } from './apiService.js'
+import { createWarehouseMap, getOptimalRoute } from './apiService.js'
 import './WarehouseGrid.css'
 
 const START_CELL = [0, 0]
+const getCellKey = (row, col) => `${row}-${col}`
 
 const createLayout = (aisleCount, shelvesPerAisle) => {
   const rows = aisleCount * 2 + 1
@@ -23,10 +24,16 @@ const createLayout = (aisleCount, shelvesPerAisle) => {
   return layout
 }
 
-const getCellClassName = (cellType, isCurrentStep) => {
+const getCellClassName = (cellType, isCurrentStep, visitCount = 0) => {
   if (cellType === 2) return 'cell cell-start'
   if (cellType === 3) return 'cell cell-target'
-  if (cellType === 4) return isCurrentStep ? 'cell cell-path cell-path-current' : 'cell cell-path'
+  if (cellType === 4) {
+    const intensityClass =
+      visitCount >= 3 ? 'cell-path-3' : visitCount === 2 ? 'cell-path-2' : 'cell-path-1'
+    return isCurrentStep
+      ? `cell cell-path ${intensityClass} cell-path-current`
+      : `cell cell-path ${intensityClass}`
+  }
   if (cellType === 1) return 'cell cell-shelf'
   return 'cell cell-floor'
 }
@@ -37,6 +44,7 @@ function WarehouseGrid() {
   const [aisleCount, setAisleCount] = useState(4)
   const [shelvesPerAisle, setShelvesPerAisle] = useState(12)
   const [isConfigured, setIsConfigured] = useState(false)
+  const [warehouseMapId, setWarehouseMapId] = useState(null)
 
   const [baseLayout, setBaseLayout] = useState([])
   const [pickingList, setPickingList] = useState([])
@@ -77,7 +85,11 @@ function WarehouseGrid() {
     })
 
     routePath.slice(0, revealedSteps).forEach(([row, col]) => {
-      if (nextLayout[row]?.[col] !== 2 && nextLayout[row]?.[col] !== 3) {
+      if (
+        nextLayout[row]?.[col] !== 1 &&
+        nextLayout[row]?.[col] !== 2 &&
+        nextLayout[row]?.[col] !== 3
+      ) {
         nextLayout[row][col] = 4
       }
     })
@@ -85,11 +97,29 @@ function WarehouseGrid() {
     return nextLayout
   }, [baseLayout, pickingList, routePath, revealedSteps])
 
+  const pathVisitMeta = useMemo(() => {
+    const countByCell = new Map()
+    const visiblePath = routePath.slice(0, revealedSteps)
+
+    visiblePath.forEach(([row, col]) => {
+      const key = getCellKey(row, col)
+      countByCell.set(key, (countByCell.get(key) ?? 0) + 1)
+    })
+
+    const currentStep = visiblePath[visiblePath.length - 1]
+    const currentStepKey = currentStep ? getCellKey(currentStep[0], currentStep[1]) : null
+
+    return {
+      countByCell,
+      currentStepKey,
+    }
+  }, [routePath, revealedSteps])
+
   const selectedTargetLabel = pickingList.length
     ? `${pickingList.length} target${pickingList.length === 1 ? '' : 's'} selected`
     : 'No targets selected yet'
 
-  const buildWarehouse = () => {
+  const buildWarehouse = async () => {
     const parsedAisles = Number.parseInt(aisleCountInput, 10)
     const parsedShelves = Number.parseInt(shelvesPerAisleInput, 10)
 
@@ -105,15 +135,45 @@ function WarehouseGrid() {
 
     const layout = createLayout(parsedAisles, parsedShelves)
 
-    setAisleCount(parsedAisles)
-    setShelvesPerAisle(parsedShelves)
-    setBaseLayout(layout)
-    setPickingList([])
-    setRoutePath([])
-    setRouteDistance(null)
-    setIsConfigured(true)
+    setLoading(true)
     setError('')
-    setNotice('Warehouse generated. Click shelf cells to choose picking targets.')
+
+    try {
+      const persisted = await createWarehouseMap({
+        name: `Warehouse ${parsedAisles}x${parsedShelves}`,
+        aisleCount: parsedAisles,
+        shelvesPerAisle: parsedShelves,
+        grid: layout,
+      })
+
+      const persistedMap = persisted?.warehouse_map
+
+      setAisleCount(parsedAisles)
+      setShelvesPerAisle(parsedShelves)
+      setBaseLayout(layout)
+      setPickingList([])
+      setRoutePath([])
+      setRouteDistance(null)
+      setWarehouseMapId(persistedMap?.id ?? null)
+      setIsConfigured(true)
+      setNotice('Warehouse generated and saved. Click shelf cells to choose picking targets.')
+    } catch (requestError) {
+      setAisleCount(parsedAisles)
+      setShelvesPerAisle(parsedShelves)
+      setBaseLayout(layout)
+      setPickingList([])
+      setRoutePath([])
+      setRouteDistance(null)
+      setWarehouseMapId(null)
+      setIsConfigured(true)
+      setNotice('Warehouse generated locally. Backend save failed, route calls will send full grid.')
+      setError(
+        requestError?.response?.data?.message ||
+          'Could not persist the warehouse map. Continuing with local map data.',
+      )
+    } finally {
+      setLoading(false)
+    }
   }
 
   const resetWarehouse = () => {
@@ -122,6 +182,7 @@ function WarehouseGrid() {
     setPickingList([])
     setRoutePath([])
     setRouteDistance(null)
+    setWarehouseMapId(null)
     setError('')
     setNotice('Configure aisles and shelves, then click Generate Warehouse.')
   }
@@ -157,11 +218,19 @@ function WarehouseGrid() {
     setNotice('Requesting an optimized route from the backend...')
 
     try {
-      const response = await getOptimalRoute(pickingList, START_CELL)
+      const response = await getOptimalRoute({
+        pickingList,
+        start: START_CELL,
+        warehouseMapId,
+        grid: warehouseMapId ? null : baseLayout,
+      })
 
       if (response?.status === 'success') {
         setRoutePath(Array.isArray(response.path) ? response.path : [])
         setRouteDistance(response.distance ?? null)
+        if (response.warehouse_map_id) {
+          setWarehouseMapId(response.warehouse_map_id)
+        }
         setNotice('Route received. Replay is now running on the grid.')
       } else {
         setRoutePath([])
@@ -240,6 +309,9 @@ function WarehouseGrid() {
               <p>
                 Layout: {aisleCount} aisle(s), {shelvesPerAisle} shelf slot(s) per aisle.
               </p>
+              <p>
+                Map ID: {warehouseMapId ?? 'local-only'}
+              </p>
 
               <div className="legend-row">
                 <span className="badge floor">Floor</span>
@@ -291,16 +363,15 @@ function WarehouseGrid() {
               >
                 {displayLayout.map((row, rowIndex) =>
                   row.map((cellType, colIndex) => {
-                    const pathIndex = routePath.findIndex(
-                      ([pathRow, pathCol]) => pathRow === rowIndex && pathCol === colIndex,
-                    )
-                    const isCurrentStep = pathIndex === revealedSteps - 1
+                    const key = getCellKey(rowIndex, colIndex)
+                    const visitCount = pathVisitMeta.countByCell.get(key) ?? 0
+                    const isCurrentStep = pathVisitMeta.currentStepKey === key
 
                     return (
                       <button
                         type="button"
                         key={`${rowIndex}-${colIndex}`}
-                        className={getCellClassName(cellType, isCurrentStep)}
+                        className={getCellClassName(cellType, isCurrentStep, visitCount)}
                         onClick={() => toggleTargetCell(rowIndex, colIndex)}
                         aria-label={`Cell ${rowIndex}, ${colIndex}`}
                         title={`(${rowIndex}, ${colIndex})`}
