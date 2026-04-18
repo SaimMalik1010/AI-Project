@@ -1,5 +1,5 @@
 import heapq
-from .utils import manhattan_distance
+from .utils import manhattan_distance, Node
 
 class AStarPathfinder:
     def __init__(self, grid_data):
