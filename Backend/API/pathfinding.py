@@ -103,7 +103,347 @@ def _a_star_segment(grid, start, goal, walkable):
     return path
 
 
-def calculate_a_star_route(grid, start, goals):
+def _dedupe_goals(goals):
+    seen = set()
+    unique = []
+    for goal in goals:
+        goal_tuple = tuple(goal)
+        if goal_tuple not in seen:
+            seen.add(goal_tuple)
+            unique.append(goal_tuple)
+    return unique
+
+
+def _coverage_mask_for_point(point, goal_to_index):
+    return goal_to_index.get(tuple(point), 0)
+
+
+def _build_goal_coverage_by_point(grid, goals, walkable):
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    coverage_mask_by_point = {}
+
+    for goal_index, goal in enumerate(goals):
+        goal_bit = 1 << goal_index
+        goal_row, goal_col = goal
+
+        for next_row, next_col in _neighbors(goal_row, goal_col, rows, cols):
+            point = (next_row, next_col)
+            if point in walkable and grid[next_row][next_col] != 1:
+                coverage_mask_by_point[point] = coverage_mask_by_point.get(point, 0) | goal_bit
+
+    return coverage_mask_by_point
+
+
+def _segment_coverage_mask(segment, coverage_mask_by_point):
+    mask = 0
+    for row, col in segment:
+        mask |= _coverage_mask_for_point((row, col), coverage_mask_by_point)
+    return mask
+
+
+def _build_service_nodes(start, goals, grid, walkable):
+    service_nodes = {tuple(start)}
+
+    for goal in goals:
+        endpoints = _pickup_endpoints_for_goal(goal, grid, walkable)
+        if not endpoints:
+            raise ValueError(f"No accessible pickup position for target {list(goal)}")
+        service_nodes.update(endpoints)
+
+    return sorted(service_nodes)
+
+
+def _build_pairwise_segments(grid, service_nodes, walkable, coverage_mask_by_point):
+    node_count = len(service_nodes)
+    segments = [[None for _ in range(node_count)] for _ in range(node_count)]
+    distances = [[None for _ in range(node_count)] for _ in range(node_count)]
+    coverage_masks = [[0 for _ in range(node_count)] for _ in range(node_count)]
+
+    for source_index, source in enumerate(service_nodes):
+        segments[source_index][source_index] = [[source[0], source[1]]]
+        distances[source_index][source_index] = 0
+        coverage_masks[source_index][source_index] = _coverage_mask_for_point(source, coverage_mask_by_point)
+
+        for target_index, target in enumerate(service_nodes):
+            if source_index == target_index:
+                continue
+
+            segment = _a_star_segment(
+                grid,
+                [source[0], source[1]],
+                [target[0], target[1]],
+                walkable,
+            )
+
+            if not segment:
+                continue
+
+            segments[source_index][target_index] = segment
+            distances[source_index][target_index] = len(segment) - 1
+            coverage_masks[source_index][target_index] = _segment_coverage_mask(segment, coverage_mask_by_point)
+
+    return segments, distances, coverage_masks
+
+
+def _run_state_space_dijkstra(start_state, distances, coverage_masks, all_targets_mask):
+    frontier = [(0, start_state[0], start_state[1])]
+    best_cost = {start_state: 0}
+    came_from = {}
+    final_state = None
+    node_count = len(distances)
+
+    while frontier:
+        current_cost, current_mask, current_index = heapq.heappop(frontier)
+        current_state = (current_mask, current_index)
+
+        if best_cost.get(current_state) != current_cost:
+            continue
+
+        if current_mask == all_targets_mask:
+            final_state = current_state
+            break
+
+        for next_index in range(node_count):
+            if next_index == current_index:
+                continue
+
+            step_distance = distances[current_index][next_index]
+            if step_distance is None:
+                continue
+
+            next_mask = current_mask | coverage_masks[current_index][next_index]
+            next_cost = current_cost + step_distance
+            next_state = (next_mask, next_index)
+
+            if next_cost < best_cost.get(next_state, float("inf")):
+                best_cost[next_state] = next_cost
+                came_from[next_state] = current_state
+                heapq.heappush(frontier, (next_cost, next_mask, next_index))
+
+    return best_cost, came_from, final_state
+
+
+def _reconstruct_state_sequence(came_from, final_state):
+    state_sequence = []
+    state = final_state
+    while state in came_from:
+        state_sequence.append(state)
+        state = came_from[state]
+    state_sequence.append(state)
+    state_sequence.reverse()
+    return state_sequence
+
+
+def _route_from_state_sequence(state_sequence, segments, start):
+    route = [[start[0], start[1]]]
+
+    for state_index in range(1, len(state_sequence)):
+        prev_state = state_sequence[state_index - 1]
+        next_state = state_sequence[state_index]
+        prev_node_index = prev_state[1]
+        next_node_index = next_state[1]
+        segment = segments[prev_node_index][next_node_index]
+
+        if not segment:
+            raise ValueError("Internal routing error while reconstructing the path")
+
+        route.extend(segment[1:])
+
+    return route
+
+
+def _shortest_completion_from_state(start_state, distances, coverage_masks, all_targets_mask, cache):
+    if start_state in cache:
+        return cache[start_state]
+
+    best_cost, came_from, final_state = _run_state_space_dijkstra(
+        start_state,
+        distances,
+        coverage_masks,
+        all_targets_mask,
+    )
+
+    if final_state is None:
+        cache[start_state] = None
+        return None
+
+    state_sequence = _reconstruct_state_sequence(came_from, final_state)
+    result = (state_sequence, best_cost[final_state])
+    cache[start_state] = result
+    return result
+
+
+def _build_globally_optimal_route(grid, start, goals, walkable):
+    unique_goals = _dedupe_goals(goals)
+    if not unique_goals:
+        return [[start[0], start[1]]]
+
+    coverage_mask_by_point = _build_goal_coverage_by_point(grid, unique_goals, walkable)
+    service_nodes = _build_service_nodes(start, unique_goals, grid, walkable)
+    segments, distances, coverage_masks = _build_pairwise_segments(
+        grid,
+        service_nodes,
+        walkable,
+        coverage_mask_by_point,
+    )
+
+    start_node = tuple(start)
+    start_index = service_nodes.index(start_node)
+    all_targets_mask = (1 << len(unique_goals)) - 1
+    initial_mask = _coverage_mask_for_point(start_node, coverage_mask_by_point)
+
+    start_state = (initial_mask, start_index)
+    best_cost, came_from, final_state = _run_state_space_dijkstra(
+        start_state,
+        distances,
+        coverage_masks,
+        all_targets_mask,
+    )
+
+    if final_state is None:
+        unresolved_goal = list(unique_goals[0])
+        raise ValueError(f"No route found to target {unresolved_goal}")
+
+    state_sequence = _reconstruct_state_sequence(came_from, final_state)
+    route = _route_from_state_sequence(state_sequence, segments, start)
+
+    return {
+        "route": route,
+        "distance": best_cost[final_state],
+        "state_sequence": state_sequence,
+        "best_cost": best_cost,
+        "segments": segments,
+        "distances": distances,
+        "coverage_masks": coverage_masks,
+        "service_nodes": service_nodes,
+        "all_targets_mask": all_targets_mask,
+    }
+
+
+def _build_route_alternatives(start, best_solution, max_routes):
+    best_route = best_solution["route"]
+    best_distance = best_solution["distance"]
+    best_state_sequence = best_solution["state_sequence"]
+    best_cost = best_solution["best_cost"]
+    segments = best_solution["segments"]
+    distances = best_solution["distances"]
+    coverage_masks = best_solution["coverage_masks"]
+    service_nodes = best_solution["service_nodes"]
+    all_targets_mask = best_solution["all_targets_mask"]
+
+    route_options = [
+        {
+            "rank": 1,
+            "path": best_route,
+            "distance": best_distance,
+            "is_best": True,
+            "label": "Best path",
+        }
+    ]
+    step_options = []
+    alternative_candidates = []
+    seen_paths = {tuple(tuple(point) for point in best_route)}
+    completion_cache = {}
+    node_count = len(service_nodes)
+
+    for step_index in range(len(best_state_sequence) - 1):
+        current_state = best_state_sequence[step_index]
+        current_mask, current_node_index = current_state
+        current_point = service_nodes[current_node_index]
+
+        best_next_state = best_state_sequence[step_index + 1]
+        best_next_node = best_next_state[1]
+        best_distance_from_current = distances[current_node_index][best_next_node]
+        best_step_total = None
+        if best_distance_from_current is not None:
+            best_step_total = (
+                best_cost[current_state]
+                + best_distance_from_current
+                + (best_solution["distance"] - best_cost[best_next_state])
+            )
+
+        alternatives_for_step = []
+
+        for next_node_index in range(node_count):
+            if next_node_index == current_node_index:
+                continue
+
+            step_distance = distances[current_node_index][next_node_index]
+            if step_distance is None:
+                continue
+
+            next_mask = current_mask | coverage_masks[current_node_index][next_node_index]
+            next_state = (next_mask, next_node_index)
+            completion = _shortest_completion_from_state(
+                next_state,
+                distances,
+                coverage_masks,
+                all_targets_mask,
+                completion_cache,
+            )
+
+            if completion is None:
+                continue
+
+            suffix_states, suffix_cost = completion
+            estimated_total_distance = best_cost[current_state] + step_distance + suffix_cost
+            is_best_step = next_state == best_next_state and estimated_total_distance == best_distance
+
+            alternatives_for_step.append(
+                {
+                    "next": [service_nodes[next_node_index][0], service_nodes[next_node_index][1]],
+                    "estimated_total_distance": estimated_total_distance,
+                    "is_best_step": is_best_step,
+                }
+            )
+
+            if is_best_step:
+                continue
+
+            candidate_state_sequence = best_state_sequence[: step_index + 1] + suffix_states
+            candidate_route = _route_from_state_sequence(candidate_state_sequence, segments, start)
+            route_key = tuple(tuple(point) for point in candidate_route)
+            if route_key in seen_paths:
+                continue
+
+            seen_paths.add(route_key)
+            alternative_candidates.append(
+                {
+                    "path": candidate_route,
+                    "distance": estimated_total_distance,
+                }
+            )
+
+        alternatives_for_step.sort(
+            key=lambda option: (option["estimated_total_distance"], option["next"][0], option["next"][1])
+        )
+        step_options.append(
+            {
+                "step_index": step_index,
+                "at": [current_point[0], current_point[1]],
+                "alternatives": alternatives_for_step,
+            }
+        )
+
+    alternative_candidates.sort(key=lambda candidate: (candidate["distance"], len(candidate["path"])))
+
+    max_extra_routes = max(max_routes - 1, 0)
+    for option_index, candidate in enumerate(alternative_candidates[:max_extra_routes], start=2):
+        route_options.append(
+            {
+                "rank": option_index,
+                "path": candidate["path"],
+                "distance": candidate["distance"],
+                "is_best": False,
+                "label": f"Alternative #{option_index - 1}",
+            }
+        )
+
+    return route_options, step_options
+
+
+def calculate_route_with_alternatives(grid, start, goals, max_routes=5):
     if not isinstance(grid, list) or not grid or not isinstance(grid[0], list):
         raise ValueError("grid must be a 2D list")
 
@@ -113,8 +453,28 @@ def calculate_a_star_route(grid, start, goals):
     if not isinstance(goals, list) or any(not _is_coord(goal) for goal in goals):
         raise ValueError("targets must be a list of [row, col] coordinates")
 
+    try:
+        max_routes = int(max_routes)
+    except (TypeError, ValueError):
+        max_routes = 5
+    max_routes = min(max(max_routes, 1), 25)
+
     if not goals:
-        return [start], 0
+        return {
+            "path": [start],
+            "distance": 0,
+            "route_options": [
+                {
+                    "rank": 1,
+                    "path": [start],
+                    "distance": 0,
+                    "is_best": True,
+                    "label": "Best path",
+                }
+            ],
+            "step_options": [],
+            "summary": "Only the start point is required, so no movement is needed.",
+        }
 
     rows = len(grid)
     cols = len(grid[0])
@@ -126,47 +486,33 @@ def calculate_a_star_route(grid, start, goals):
             raise ValueError("start/targets include out-of-bounds coordinates")
 
     walkable = _build_walkable_set(grid, goals)
+    if tuple(start) not in walkable:
+        raise ValueError("start must be on a walkable non-shelf cell")
 
-    remaining = [tuple(goal) for goal in goals]
-    current = tuple(start)
-    route = [[current[0], current[1]]]
+    best_solution = _build_globally_optimal_route(grid, start, goals, walkable)
+    route_options, step_options = _build_route_alternatives(start, best_solution, max_routes)
 
-    while remaining:
-        selected_goal = None
-        selected_endpoint = None
-        selected_segment = None
+    for option in route_options:
+        validate_route_safety(grid, option["path"], start, goals)
 
-        candidate_goals = sorted(remaining, key=lambda goal: _heuristic(current, goal))
-        for candidate_goal in candidate_goals:
-            endpoints = _pickup_endpoints_for_goal(candidate_goal, grid, walkable)
-            endpoints = sorted(endpoints, key=lambda end: _heuristic(current, end))
+    best_distance = route_options[0]["distance"]
+    summary = (
+        f"Route #1 is globally optimal with distance {best_distance}. "
+        f"Returned {len(route_options)} ranked route option(s)."
+    )
 
-            for endpoint in endpoints:
-                segment = _a_star_segment(
-                    grid,
-                    [current[0], current[1]],
-                    [endpoint[0], endpoint[1]],
-                    walkable,
-                )
-                if segment:
-                    selected_goal = candidate_goal
-                    selected_endpoint = endpoint
-                    selected_segment = segment
-                    break
+    return {
+        "path": route_options[0]["path"],
+        "distance": best_distance,
+        "route_options": route_options,
+        "step_options": step_options,
+        "summary": summary,
+    }
 
-            if selected_segment:
-                break
 
-        if not selected_segment:
-            nearest = min(remaining, key=lambda goal: _heuristic(current, goal))
-            raise ValueError(f"No route found to target {list(nearest)}")
-
-        route.extend(selected_segment[1:])
-        current = selected_endpoint
-        remaining.remove(selected_goal)
-
-    validate_route_safety(grid, route, start, goals)
-    return route, max(len(route) - 1, 0)
+def calculate_a_star_route(grid, start, goals):
+    route_result = calculate_route_with_alternatives(grid, start, goals, max_routes=1)
+    return route_result["path"], route_result["distance"]
 
 
 def validate_route_safety(grid, route, start, goals):

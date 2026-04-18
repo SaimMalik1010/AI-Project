@@ -4,7 +4,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from .models import PickingSession, WarehouseMap
-from .pathfinding import calculate_a_star_route, validate_route_safety
+from .pathfinding import calculate_route_with_alternatives, validate_route_safety
 
 
 def _serialize_map(warehouse_map):
@@ -81,6 +81,7 @@ def get_warehouse_map(request, map_id):
 def get_route(request):
 	start = request.data.get("start", [0, 0])
 	targets = request.data.get("targets") or request.data.get("pickingList") or []
+	max_alternatives = request.data.get("max_alternatives", 5)
 	warehouse_map_id = request.data.get("warehouse_map_id")
 	grid = request.data.get("grid")
 	warehouse_map = None
@@ -162,7 +163,14 @@ def get_route(request):
 			)
 
 	try:
-		path, distance = calculate_a_star_route(grid, start, targets)
+		route_result = calculate_route_with_alternatives(
+			grid,
+			start,
+			targets,
+			max_routes=max_alternatives,
+		)
+		path = route_result["path"]
+		distance = route_result["distance"]
 		validate_route_safety(grid, path, start, targets)
 	except ValueError as exc:
 		return Response(
@@ -177,6 +185,7 @@ def get_route(request):
 		request_payload={
 			"start": start,
 			"targets": targets,
+			"max_alternatives": max_alternatives,
 			"warehouse_map_id": warehouse_map_id,
 			"grid": grid,
 		},
@@ -189,6 +198,9 @@ def get_route(request):
 			"status": "success",
 			"path": path,
 			"distance": distance,
+			"route_options": route_result["route_options"],
+			"step_options": route_result["step_options"],
+			"summary": route_result["summary"],
 			"warehouse_map_id": warehouse_map.id if warehouse_map else None,
 		}
 	)
