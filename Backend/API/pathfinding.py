@@ -103,6 +103,169 @@ def _a_star_segment(grid, start, goal, walkable):
     return path
 
 
+def _dedupe_goals(goals):
+    seen = set()
+    unique = []
+    for goal in goals:
+        goal_tuple = tuple(goal)
+        if goal_tuple not in seen:
+            seen.add(goal_tuple)
+            unique.append(goal_tuple)
+    return unique
+
+
+def _coverage_mask_for_point(point, goal_to_index):
+    return goal_to_index.get(tuple(point), 0)
+
+
+def _build_goal_coverage_by_point(grid, goals, walkable):
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    coverage_mask_by_point = {}
+
+    for goal_index, goal in enumerate(goals):
+        goal_bit = 1 << goal_index
+        goal_row, goal_col = goal
+
+        for next_row, next_col in _neighbors(goal_row, goal_col, rows, cols):
+            point = (next_row, next_col)
+            if point in walkable and grid[next_row][next_col] != 1:
+                coverage_mask_by_point[point] = coverage_mask_by_point.get(point, 0) | goal_bit
+
+    return coverage_mask_by_point
+
+
+def _segment_coverage_mask(segment, coverage_mask_by_point):
+    mask = 0
+    for row, col in segment:
+        mask |= _coverage_mask_for_point((row, col), coverage_mask_by_point)
+    return mask
+
+
+def _build_service_nodes(start, goals, grid, walkable):
+    service_nodes = {tuple(start)}
+
+    for goal in goals:
+        endpoints = _pickup_endpoints_for_goal(goal, grid, walkable)
+        if not endpoints:
+            raise ValueError(f"No accessible pickup position for target {list(goal)}")
+        service_nodes.update(endpoints)
+
+    return sorted(service_nodes)
+
+
+def _build_pairwise_segments(grid, service_nodes, walkable, coverage_mask_by_point):
+    node_count = len(service_nodes)
+    segments = [[None for _ in range(node_count)] for _ in range(node_count)]
+    distances = [[None for _ in range(node_count)] for _ in range(node_count)]
+    coverage_masks = [[0 for _ in range(node_count)] for _ in range(node_count)]
+
+    for source_index, source in enumerate(service_nodes):
+        segments[source_index][source_index] = [[source[0], source[1]]]
+        distances[source_index][source_index] = 0
+        coverage_masks[source_index][source_index] = _coverage_mask_for_point(source, coverage_mask_by_point)
+
+        for target_index, target in enumerate(service_nodes):
+            if source_index == target_index:
+                continue
+
+            segment = _a_star_segment(
+                grid,
+                [source[0], source[1]],
+                [target[0], target[1]],
+                walkable,
+            )
+
+            if not segment:
+                continue
+
+            segments[source_index][target_index] = segment
+            distances[source_index][target_index] = len(segment) - 1
+            coverage_masks[source_index][target_index] = _segment_coverage_mask(segment, coverage_mask_by_point)
+
+    return segments, distances, coverage_masks
+
+
+def _build_globally_optimal_route(grid, start, goals, walkable):
+    unique_goals = _dedupe_goals(goals)
+    if not unique_goals:
+        return [[start[0], start[1]]]
+
+    coverage_mask_by_point = _build_goal_coverage_by_point(grid, unique_goals, walkable)
+    service_nodes = _build_service_nodes(start, unique_goals, grid, walkable)
+    segments, distances, coverage_masks = _build_pairwise_segments(
+        grid,
+        service_nodes,
+        walkable,
+        coverage_mask_by_point,
+    )
+
+    start_node = tuple(start)
+    start_index = service_nodes.index(start_node)
+    all_targets_mask = (1 << len(unique_goals)) - 1
+    initial_mask = _coverage_mask_for_point(start_node, coverage_mask_by_point)
+
+    frontier = [(0, initial_mask, start_index)]
+    best_cost = {(initial_mask, start_index): 0}
+    came_from = {}
+    final_state = None
+
+    while frontier:
+        current_cost, current_mask, current_index = heapq.heappop(frontier)
+        current_state = (current_mask, current_index)
+
+        if best_cost.get(current_state) != current_cost:
+            continue
+
+        if current_mask == all_targets_mask:
+            final_state = current_state
+            break
+
+        for next_index in range(len(service_nodes)):
+            if next_index == current_index:
+                continue
+
+            step_distance = distances[current_index][next_index]
+            if step_distance is None:
+                continue
+
+            next_mask = current_mask | coverage_masks[current_index][next_index]
+            next_cost = current_cost + step_distance
+            next_state = (next_mask, next_index)
+
+            if next_cost < best_cost.get(next_state, float("inf")):
+                best_cost[next_state] = next_cost
+                came_from[next_state] = current_state
+                heapq.heappush(frontier, (next_cost, next_mask, next_index))
+
+    if final_state is None:
+        unresolved_goal = list(unique_goals[0])
+        raise ValueError(f"No route found to target {unresolved_goal}")
+
+    state_sequence = []
+    state = final_state
+    while state in came_from:
+        state_sequence.append(state)
+        state = came_from[state]
+    state_sequence.append(state)
+    state_sequence.reverse()
+
+    route = [[start[0], start[1]]]
+    for state_index in range(1, len(state_sequence)):
+        prev_state = state_sequence[state_index - 1]
+        next_state = state_sequence[state_index]
+        prev_node_index = prev_state[1]
+        next_node_index = next_state[1]
+        segment = segments[prev_node_index][next_node_index]
+
+        if not segment:
+            raise ValueError("Internal routing error while reconstructing the globally optimal path")
+
+        route.extend(segment[1:])
+
+    return route
+
+
 def calculate_a_star_route(grid, start, goals):
     if not isinstance(grid, list) or not grid or not isinstance(grid[0], list):
         raise ValueError("grid must be a 2D list")
@@ -126,44 +289,10 @@ def calculate_a_star_route(grid, start, goals):
             raise ValueError("start/targets include out-of-bounds coordinates")
 
     walkable = _build_walkable_set(grid, goals)
+    if tuple(start) not in walkable:
+        raise ValueError("start must be on a walkable non-shelf cell")
 
-    remaining = [tuple(goal) for goal in goals]
-    current = tuple(start)
-    route = [[current[0], current[1]]]
-
-    while remaining:
-        selected_goal = None
-        selected_endpoint = None
-        selected_segment = None
-
-        candidate_goals = sorted(remaining, key=lambda goal: _heuristic(current, goal))
-        for candidate_goal in candidate_goals:
-            endpoints = _pickup_endpoints_for_goal(candidate_goal, grid, walkable)
-            endpoints = sorted(endpoints, key=lambda end: _heuristic(current, end))
-
-            for endpoint in endpoints:
-                segment = _a_star_segment(
-                    grid,
-                    [current[0], current[1]],
-                    [endpoint[0], endpoint[1]],
-                    walkable,
-                )
-                if segment:
-                    selected_goal = candidate_goal
-                    selected_endpoint = endpoint
-                    selected_segment = segment
-                    break
-
-            if selected_segment:
-                break
-
-        if not selected_segment:
-            nearest = min(remaining, key=lambda goal: _heuristic(current, goal))
-            raise ValueError(f"No route found to target {list(nearest)}")
-
-        route.extend(selected_segment[1:])
-        current = selected_endpoint
-        remaining.remove(selected_goal)
+    route = _build_globally_optimal_route(grid, start, goals, walkable)
 
     validate_route_safety(grid, route, start, goals)
     return route, max(len(route) - 1, 0)
