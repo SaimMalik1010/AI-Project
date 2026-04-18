@@ -48,6 +48,10 @@ function WarehouseGrid() {
 
   const [baseLayout, setBaseLayout] = useState([])
   const [pickingList, setPickingList] = useState([])
+  const [routeOptions, setRouteOptions] = useState([])
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0)
+  const [stepOptions, setStepOptions] = useState([])
+  const [routeSummary, setRouteSummary] = useState('')
   const [routePath, setRoutePath] = useState([])
   const [revealedSteps, setRevealedSteps] = useState(0)
   const [routeDistance, setRouteDistance] = useState(null)
@@ -152,6 +156,10 @@ function WarehouseGrid() {
       setShelvesPerAisle(parsedShelves)
       setBaseLayout(layout)
       setPickingList([])
+      setRouteOptions([])
+      setSelectedRouteIndex(0)
+      setStepOptions([])
+      setRouteSummary('')
       setRoutePath([])
       setRouteDistance(null)
       setWarehouseMapId(persistedMap?.id ?? null)
@@ -162,6 +170,10 @@ function WarehouseGrid() {
       setShelvesPerAisle(parsedShelves)
       setBaseLayout(layout)
       setPickingList([])
+      setRouteOptions([])
+      setSelectedRouteIndex(0)
+      setStepOptions([])
+      setRouteSummary('')
       setRoutePath([])
       setRouteDistance(null)
       setWarehouseMapId(null)
@@ -180,6 +192,10 @@ function WarehouseGrid() {
     setIsConfigured(false)
     setBaseLayout([])
     setPickingList([])
+    setRouteOptions([])
+    setSelectedRouteIndex(0)
+    setStepOptions([])
+    setRouteSummary('')
     setRoutePath([])
     setRouteDistance(null)
     setWarehouseMapId(null)
@@ -223,21 +239,47 @@ function WarehouseGrid() {
         start: START_CELL,
         warehouseMapId,
         grid: warehouseMapId ? null : baseLayout,
+        maxAlternatives: 8,
       })
 
       if (response?.status === 'success') {
-        setRoutePath(Array.isArray(response.path) ? response.path : [])
-        setRouteDistance(response.distance ?? null)
+        const nextOptions =
+          Array.isArray(response.route_options) && response.route_options.length
+            ? response.route_options
+            : [
+                {
+                  rank: 1,
+                  path: Array.isArray(response.path) ? response.path : [],
+                  distance: response.distance ?? null,
+                  is_best: true,
+                  label: 'Best path',
+                },
+              ]
+
+        setRouteOptions(nextOptions)
+        setSelectedRouteIndex(0)
+        setRoutePath(Array.isArray(nextOptions[0]?.path) ? nextOptions[0].path : [])
+        setRouteDistance(nextOptions[0]?.distance ?? response.distance ?? null)
+        setStepOptions(Array.isArray(response.step_options) ? response.step_options : [])
+        setRouteSummary(response.summary || '')
         if (response.warehouse_map_id) {
           setWarehouseMapId(response.warehouse_map_id)
         }
-        setNotice('Route received. Replay is now running on the grid.')
+        setNotice('Best route and alternatives received. Use the controls to replay each option.')
       } else {
+        setRouteOptions([])
+        setSelectedRouteIndex(0)
+        setStepOptions([])
+        setRouteSummary('')
         setRoutePath([])
         setRouteDistance(null)
         setError('The backend returned an unexpected response.')
       }
     } catch (requestError) {
+      setRouteOptions([])
+      setSelectedRouteIndex(0)
+      setStepOptions([])
+      setRouteSummary('')
       setRoutePath([])
       setRouteDistance(null)
       setError(
@@ -246,6 +288,23 @@ function WarehouseGrid() {
       )
     } finally {
       setLoading(false)
+    }
+  }
+
+  const selectRouteOption = (nextIndex) => {
+    if (nextIndex < 0 || nextIndex >= routeOptions.length) {
+      return
+    }
+
+    const selectedOption = routeOptions[nextIndex]
+    setSelectedRouteIndex(nextIndex)
+    setRoutePath(Array.isArray(selectedOption?.path) ? selectedOption.path : [])
+    setRouteDistance(selectedOption?.distance ?? null)
+
+    if (selectedOption?.is_best) {
+      setNotice('Showing the globally best path.')
+    } else {
+      setNotice(`Showing alternative route #${nextIndex + 1}.`)
     }
   }
 
@@ -345,6 +404,60 @@ function WarehouseGrid() {
                   )}
                 </div>
               </div>
+
+              {routeOptions.length ? (
+                <div className="route-options-card">
+                  <strong>Route options</strong>
+                  <p>
+                    Viewing route #{selectedRouteIndex + 1} of {routeOptions.length}.
+                  </p>
+                  {routeSummary ? <p className="route-summary">{routeSummary}</p> : null}
+                  <div className="route-option-actions">
+                    <button
+                      type="button"
+                      className="secondary-button route-switch"
+                      onClick={() => selectRouteOption(selectedRouteIndex - 1)}
+                      disabled={selectedRouteIndex === 0}
+                    >
+                      Previous option
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button route-switch"
+                      onClick={() => selectRouteOption(selectedRouteIndex + 1)}
+                      disabled={selectedRouteIndex >= routeOptions.length - 1}
+                    >
+                      Next option
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              {stepOptions.length ? (
+                <div className="step-options-card">
+                  <strong>Step-by-step alternatives (best path)</strong>
+                  <div className="step-options-list">
+                    {stepOptions.map((step) => (
+                      <div key={`step-option-${step.step_index}`} className="step-option-item">
+                        <p>
+                          Step {step.step_index} at ({step.at[0]}, {step.at[1]})
+                        </p>
+                        <p className="step-option-values">
+                          {step.alternatives.length
+                            ? step.alternatives
+                                .slice(0, 4)
+                                .map((option) => {
+                                  const marker = option.is_best_step ? 'best' : 'alt'
+                                  return `${marker}: (${option.next[0]}, ${option.next[1]}) -> ${option.estimated_total_distance}`
+                                })
+                                .join(' | ')
+                            : 'No alternatives available'}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {error ? <p className="error-box">{error}</p> : null}
             </aside>

@@ -33,10 +33,12 @@ export const getOptimalRoute = async ({
   start = [0, 0],
   warehouseMapId = null,
   grid = null,
+  maxAlternatives = 6,
 }) => {
   const payload = {
     start,
     targets: pickingList,
+    max_alternatives: maxAlternatives,
   }
 
   if (warehouseMapId !== null && warehouseMapId !== undefined) {
