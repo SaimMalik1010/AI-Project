@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { createWarehouseMap, getOptimalRoute } from './apiService.js'
 import './WarehouseGrid.css'
 
-const START_CELL = [0, 0]
 const getCellKey = (row, col) => `${row}-${col}`
 
 const createLayout = (aisleCount, shelvesPerAisle) => {
@@ -11,9 +10,6 @@ const createLayout = (aisleCount, shelvesPerAisle) => {
   const cols = shelvesPerAisle + 2
   const layout = Array.from({ length: rows }, () => Array.from({ length: cols }, () => 0))
 
-  layout[START_CELL[0]][START_CELL[1]] = 2
-
-  // Each aisle is one shelf row, separated by one walking row.
   for (let aisle = 0; aisle < aisleCount; aisle += 1) {
     const row = aisle * 2 + 1
     for (let col = 1; col <= shelvesPerAisle; col += 1) {
@@ -24,104 +20,206 @@ const createLayout = (aisleCount, shelvesPerAisle) => {
   return layout
 }
 
-const getCellClassName = (cellType, isCurrentStep, visitCount = 0) => {
-  if (cellType === 2) return 'cell cell-start'
-  if (cellType === 3) return 'cell cell-target'
-  if (cellType === 4) {
-    const intensityClass =
-      visitCount >= 3 ? 'cell-path-3' : visitCount === 2 ? 'cell-path-2' : 'cell-path-1'
-    return isCurrentStep
-      ? `cell cell-path ${intensityClass} cell-path-current`
-      : `cell cell-path ${intensityClass}`
+const createRobotDraft = (suffix, cols = 2) => ({
+  id: `R${suffix}`,
+  startRow: '0',
+  startCol: '0',
+  stops: [],
+  priority: String(suffix),
+})
+
+const getCellClassName = (cellType, hasGoal, hasStop, hasActiveStop, isSelectable) => {
+  if (cellType === 1) {
+    const shelfClasses = ['cell', 'cell-shelf']
+    if (hasStop) shelfClasses.push('cell-stop')
+    if (hasActiveStop) shelfClasses.push('cell-active-stop')
+    if (isSelectable) shelfClasses.push('cell-selectable')
+    return shelfClasses.join(' ')
   }
-  if (cellType === 1) return 'cell cell-shelf'
+  if (hasActiveStop) return 'cell cell-active-stop'
+  if (hasStop) return 'cell cell-stop'
+  if (hasGoal) return 'cell cell-goal'
+  if (isSelectable) return 'cell cell-floor cell-selectable'
   return 'cell cell-floor'
 }
 
 function WarehouseGrid() {
   const [aisleCountInput, setAisleCountInput] = useState('4')
   const [shelvesPerAisleInput, setShelvesPerAisleInput] = useState('12')
-  const [aisleCount, setAisleCount] = useState(4)
-  const [shelvesPerAisle, setShelvesPerAisle] = useState(12)
   const [isConfigured, setIsConfigured] = useState(false)
   const [warehouseMapId, setWarehouseMapId] = useState(null)
-
   const [baseLayout, setBaseLayout] = useState([])
-  const [pickingList, setPickingList] = useState([])
-  const [routeOptions, setRouteOptions] = useState([])
-  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0)
-  const [stepOptions, setStepOptions] = useState([])
-  const [routeSummary, setRouteSummary] = useState('')
-  const [routePath, setRoutePath] = useState([])
-  const [revealedSteps, setRevealedSteps] = useState(0)
-  const [routeDistance, setRouteDistance] = useState(null)
+  const [robotDrafts, setRobotDrafts] = useState([createRobotDraft(1), createRobotDraft(2)])
+  const [plannedRobots, setPlannedRobots] = useState([])
+  const [conflictsResolved, setConflictsResolved] = useState([])
+  const [summary, setSummary] = useState('')
+  const [makespan, setMakespan] = useState(0)
+  const [currentTick, setCurrentTick] = useState(0)
+  const [isAnimating, setIsAnimating] = useState(false)
   const [loading, setLoading] = useState(false)
-  const [notice, setNotice] = useState('Configure aisles and shelves, then click Generate Warehouse.')
+  const [notice, setNotice] = useState('Configure aisles and shelves, then set starts and shelf picks by clicking cells.')
   const [error, setError] = useState('')
+  const [selectedRobotIndex, setSelectedRobotIndex] = useState(0)
+  const [gridClickMode, setGridClickMode] = useState('stop')
 
   useEffect(() => {
-    if (!routePath.length) {
-      setRevealedSteps(0)
+    if (!plannedRobots.length || !isAnimating) {
       return undefined
     }
 
-    setRevealedSteps(0)
-    const timers = routePath.map((_, index) =>
-      window.setTimeout(() => {
-        setRevealedSteps(index + 1)
-      }, index * 140),
+    const timerId = window.setInterval(() => {
+      setCurrentTick((tick) => {
+        if (tick >= makespan) {
+          setIsAnimating(false)
+          return makespan
+        }
+        return tick + 1
+      })
+    }, 420)
+
+    return () => window.clearInterval(timerId)
+  }, [plannedRobots, isAnimating, makespan])
+
+  const robotGoals = useMemo(() => {
+    const goals = new Set()
+    const source = plannedRobots.length ? plannedRobots : []
+    source.forEach((robot) => {
+      if (Array.isArray(robot.goal) && robot.goal.length === 2) {
+        goals.add(getCellKey(robot.goal[0], robot.goal[1]))
+      }
+    })
+    return goals
+  }, [plannedRobots])
+
+  const draftStopsByCell = useMemo(() => {
+    const stopMap = new Map()
+
+    robotDrafts.forEach((robot, robotIndex) => {
+      const stops = Array.isArray(robot.stops) ? robot.stops : []
+      stops.forEach((stop, stopIndex) => {
+        const key = getCellKey(stop[0], stop[1])
+        const existing = stopMap.get(key) || []
+        existing.push({ robotIndex, robotId: robot.id || `R${robotIndex + 1}`, stopIndex })
+        stopMap.set(key, existing)
+      })
+    })
+
+    return stopMap
+  }, [robotDrafts])
+
+  const activeRobotId = robotDrafts[selectedRobotIndex]?.id || ''
+
+  const isActiveRobotStop = (row, col) => {
+    const activeRobot = robotDrafts[selectedRobotIndex]
+    if (!activeRobot || !Array.isArray(activeRobot.stops)) {
+      return false
+    }
+    return activeRobot.stops.some((stop) => stop[0] === row && stop[1] === col)
+  }
+
+  const toggleStopForRobot = (robotIndex, row, col) => {
+    setRobotDrafts((current) =>
+      current.map((robot, index) => {
+        if (index !== robotIndex) {
+          return robot
+        }
+
+        const currentStops = Array.isArray(robot.stops) ? robot.stops : []
+        const exists = currentStops.some((stop) => stop[0] === row && stop[1] === col)
+        if (exists) {
+          return {
+            ...robot,
+            stops: currentStops.filter((stop) => !(stop[0] === row && stop[1] === col)),
+          }
+        }
+
+        return {
+          ...robot,
+          stops: [...currentStops, [row, col]],
+        }
+      }),
     )
+  }
 
-    return () => {
-      timers.forEach((timerId) => window.clearTimeout(timerId))
+  const setStartForRobot = (robotIndex, row, col) => {
+    setRobotDrafts((current) =>
+      current.map((robot, index) =>
+        index === robotIndex
+          ? {
+              ...robot,
+              startRow: String(row),
+              startCol: String(col),
+            }
+          : robot,
+      ),
+    )
+  }
+
+  const onGridCellClick = (row, col, cellType) => {
+    if (selectedRobotIndex < 0 || selectedRobotIndex >= robotDrafts.length) {
+      setError('Select a robot card first.')
+      return
     }
-  }, [routePath])
 
-  const displayLayout = useMemo(() => {
-    if (!baseLayout.length) return []
+    if (gridClickMode === 'start') {
+      if (cellType === 1) {
+        setError('Start position must be on floor, not on a shelf.')
+        return
+      }
+      setError('')
+      setStartForRobot(selectedRobotIndex, row, col)
+      return
+    }
 
-    const nextLayout = baseLayout.map((row) => [...row])
+    if (cellType !== 1) {
+      setError('Stop selection mode only accepts shelf cells. Click a shelf to add/remove a stop.')
+      return
+    }
 
-    pickingList.forEach(([row, col]) => {
-      if (nextLayout[row]?.[col] === 1) {
-        nextLayout[row][col] = 3
+    setError('')
+    toggleStopForRobot(selectedRobotIndex, row, col)
+  }
+
+  const robotPositionsByCell = useMemo(() => {
+    const positionMap = new Map()
+
+    plannedRobots.forEach((robot) => {
+      const path = Array.isArray(robot.path) ? robot.path : []
+      if (!path.length) {
+        return
+      }
+
+      const clampedTick = Math.min(currentTick, path.length - 1)
+      const cell = path[clampedTick]
+      const key = getCellKey(cell[0], cell[1])
+      const value = positionMap.get(key) || []
+      value.push(robot.id)
+      positionMap.set(key, value)
+    })
+
+    return positionMap
+  }, [plannedRobots, currentTick])
+
+  const robotStateRows = useMemo(() => {
+    return plannedRobots.map((robot) => {
+      const path = robot.path || []
+      if (!path.length) {
+        return { id: robot.id, priority: robot.priority, state: 'Idle', flash: false }
+      }
+
+      const finished = currentTick >= path.length - 1
+      const isWaiting = (robot.wait_times || []).includes(currentTick)
+      const yieldedNow = (robot.yield_times || []).includes(currentTick)
+      const state = finished ? 'Finished' : isWaiting || yieldedNow ? 'Yielding' : 'Moving'
+
+      return {
+        id: robot.id,
+        priority: robot.priority,
+        state,
+        flash: isWaiting || yieldedNow,
       }
     })
-
-    routePath.slice(0, revealedSteps).forEach(([row, col]) => {
-      if (
-        nextLayout[row]?.[col] !== 1 &&
-        nextLayout[row]?.[col] !== 2 &&
-        nextLayout[row]?.[col] !== 3
-      ) {
-        nextLayout[row][col] = 4
-      }
-    })
-
-    return nextLayout
-  }, [baseLayout, pickingList, routePath, revealedSteps])
-
-  const pathVisitMeta = useMemo(() => {
-    const countByCell = new Map()
-    const visiblePath = routePath.slice(0, revealedSteps)
-
-    visiblePath.forEach(([row, col]) => {
-      const key = getCellKey(row, col)
-      countByCell.set(key, (countByCell.get(key) ?? 0) + 1)
-    })
-
-    const currentStep = visiblePath[visiblePath.length - 1]
-    const currentStepKey = currentStep ? getCellKey(currentStep[0], currentStep[1]) : null
-
-    return {
-      countByCell,
-      currentStepKey,
-    }
-  }, [routePath, revealedSteps])
-
-  const selectedTargetLabel = pickingList.length
-    ? `${pickingList.length} target${pickingList.length === 1 ? '' : 's'} selected`
-    : 'No targets selected yet'
+  }, [plannedRobots, currentTick])
 
   const buildWarehouse = async () => {
     const parsedAisles = Number.parseInt(aisleCountInput, 10)
@@ -131,14 +229,12 @@ function WarehouseGrid() {
       setError('Aisles must be between 1 and 20.')
       return
     }
-
     if (Number.isNaN(parsedShelves) || parsedShelves < 1 || parsedShelves > 50) {
       setError('Shelves per aisle must be between 1 and 50.')
       return
     }
 
     const layout = createLayout(parsedAisles, parsedShelves)
-
     setLoading(true)
     setError('')
 
@@ -150,40 +246,24 @@ function WarehouseGrid() {
         grid: layout,
       })
 
-      const persistedMap = persisted?.warehouse_map
-
-      setAisleCount(parsedAisles)
-      setShelvesPerAisle(parsedShelves)
-      setBaseLayout(layout)
-      setPickingList([])
-      setRouteOptions([])
-      setSelectedRouteIndex(0)
-      setStepOptions([])
-      setRouteSummary('')
-      setRoutePath([])
-      setRouteDistance(null)
-      setWarehouseMapId(persistedMap?.id ?? null)
-      setIsConfigured(true)
-      setNotice('Warehouse generated and saved. Click shelf cells to choose picking targets.')
+      setWarehouseMapId(persisted?.warehouse_map?.id ?? null)
+      setNotice('Warehouse generated and saved. Select robot cards, click shelves for picks, then run orchestration.')
     } catch (requestError) {
-      setAisleCount(parsedAisles)
-      setShelvesPerAisle(parsedShelves)
-      setBaseLayout(layout)
-      setPickingList([])
-      setRouteOptions([])
-      setSelectedRouteIndex(0)
-      setStepOptions([])
-      setRouteSummary('')
-      setRoutePath([])
-      setRouteDistance(null)
       setWarehouseMapId(null)
-      setIsConfigured(true)
-      setNotice('Warehouse generated locally. Backend save failed, route calls will send full grid.')
+      setNotice('Warehouse generated locally. Route requests will include the full grid payload.')
       setError(
         requestError?.response?.data?.message ||
-          'Could not persist the warehouse map. Continuing with local map data.',
+          'Could not persist warehouse map. Continuing with local layout only.',
       )
     } finally {
+      setBaseLayout(layout)
+      setPlannedRobots([])
+      setConflictsResolved([])
+      setSummary('')
+      setCurrentTick(0)
+      setMakespan(0)
+      setIsAnimating(false)
+      setIsConfigured(true)
       setLoading(false)
     }
   }
@@ -191,121 +271,166 @@ function WarehouseGrid() {
   const resetWarehouse = () => {
     setIsConfigured(false)
     setBaseLayout([])
-    setPickingList([])
-    setRouteOptions([])
-    setSelectedRouteIndex(0)
-    setStepOptions([])
-    setRouteSummary('')
-    setRoutePath([])
-    setRouteDistance(null)
     setWarehouseMapId(null)
+    setRobotDrafts([createRobotDraft(1), createRobotDraft(2)])
+    setPlannedRobots([])
+    setConflictsResolved([])
+    setSummary('')
+    setCurrentTick(0)
+    setMakespan(0)
+    setIsAnimating(false)
     setError('')
-    setNotice('Configure aisles and shelves, then click Generate Warehouse.')
+    setNotice('Configure aisles and shelves, then set starts and shelf picks by clicking cells.')
+    setSelectedRobotIndex(0)
+    setGridClickMode('stop')
   }
 
-  const toggleTargetCell = (rowIndex, colIndex) => {
-    const cellState = baseLayout[rowIndex]?.[colIndex]
+  const updateRobotDraft = (index, field, value) => {
+    setRobotDrafts((current) =>
+      current.map((robot, robotIndex) =>
+        robotIndex === index ? { ...robot, [field]: value } : robot,
+      ),
+    )
+  }
 
-    if (cellState !== 1) {
-      return
-    }
+  const addRobotDraft = () => {
+    setRobotDrafts((current) => [...current, createRobotDraft(current.length + 1, baseLayout[0]?.length || 2)])
+    setSelectedRobotIndex(robotDrafts.length)
+  }
 
-    setPickingList((currentList) => {
-      const existingIndex = currentList.findIndex(([row, col]) => row === rowIndex && col === colIndex)
-
-      if (existingIndex >= 0) {
-        setNotice(`Removed target (${rowIndex}, ${colIndex}) from the picking list.`)
-        return currentList.filter(([row, col]) => row !== rowIndex || col !== colIndex)
+  const removeRobotDraft = (index) => {
+    setRobotDrafts((current) => current.filter((_, robotIndex) => robotIndex !== index))
+    setSelectedRobotIndex((current) => {
+      if (current === index) {
+        return 0
       }
-
-      setNotice(`Added target (${rowIndex}, ${colIndex}) to the picking list.`)
-      return [...currentList, [rowIndex, colIndex]]
+      if (current > index) {
+        return current - 1
+      }
+      return current
     })
   }
 
-  const calculateRoute = async () => {
-    if (!pickingList.length) {
-      setError('Select at least one shelf target before calculating a route.')
+  const normalizeRobots = () => {
+    if (!baseLayout.length) {
+      throw new Error('Generate a warehouse map before planning robot routes.')
+    }
+
+    const rows = baseLayout.length
+    const cols = baseLayout[0].length
+    const ids = new Set()
+
+    return robotDrafts.map((robot, index) => {
+      const id = String(robot.id || '').trim()
+      const startRow = Number.parseInt(robot.startRow, 10)
+      const startCol = Number.parseInt(robot.startCol, 10)
+      const stops = Array.isArray(robot.stops) ? robot.stops : []
+      const priority = Number.parseInt(robot.priority, 10)
+
+      if (!id) {
+        throw new Error(`Robot #${index + 1} needs an ID.`)
+      }
+      if (ids.has(id)) {
+        throw new Error(`Robot ID '${id}' is duplicated.`)
+      }
+      ids.add(id)
+
+      if ([startRow, startCol, priority].some((value) => Number.isNaN(value))) {
+        throw new Error(`Robot '${id}' has invalid numeric coordinates or priority.`)
+      }
+
+      if (!stops.length) {
+        throw new Error(`Robot '${id}' must have at least one stop.`)
+      }
+
+      if (
+        startRow < 0 ||
+        startCol < 0 ||
+        startRow >= rows ||
+        startCol >= cols
+      ) {
+        throw new Error(`Robot '${id}' start is out of bounds.`)
+      }
+
+      if (baseLayout[startRow][startCol] === 1) {
+        throw new Error(`Robot '${id}' start cannot be placed on shelf cells.`)
+      }
+
+      stops.forEach((stop, stopIndex) => {
+        const stopRow = stop[0]
+        const stopCol = stop[1]
+        if (stopRow < 0 || stopCol < 0 || stopRow >= rows || stopCol >= cols) {
+          throw new Error(`Robot '${id}' has out-of-bounds stop at index ${stopIndex + 1}.`)
+        }
+        if (baseLayout[stopRow][stopCol] !== 1) {
+          throw new Error(`Robot '${id}' stop at index ${stopIndex + 1} must be a shelf cell.`)
+        }
+      })
+
+      const goal = stops[stops.length - 1]
+
+      return {
+        id,
+        start: [startRow, startCol],
+        stops,
+        goal,
+        priority,
+      }
+    })
+  }
+
+  const planRoutes = async () => {
+    if (robotDrafts.length < 2) {
+      setError('Add at least two robots for multi-agent orchestration.')
       return
     }
 
     setLoading(true)
     setError('')
-    setNotice('Requesting an optimized route from the backend...')
 
     try {
+      const normalizedRobots = normalizeRobots()
       const response = await getOptimalRoute({
-        pickingList,
-        start: START_CELL,
+        robots: normalizedRobots,
         warehouseMapId,
         grid: warehouseMapId ? null : baseLayout,
-        maxAlternatives: 8,
       })
 
-      if (response?.status === 'success') {
-        const nextOptions =
-          Array.isArray(response.route_options) && response.route_options.length
-            ? response.route_options
-            : [
-                {
-                  rank: 1,
-                  path: Array.isArray(response.path) ? response.path : [],
-                  distance: response.distance ?? null,
-                  is_best: true,
-                  label: 'Best path',
-                },
-              ]
-
-        setRouteOptions(nextOptions)
-        setSelectedRouteIndex(0)
-        setRoutePath(Array.isArray(nextOptions[0]?.path) ? nextOptions[0].path : [])
-        setRouteDistance(nextOptions[0]?.distance ?? response.distance ?? null)
-        setStepOptions(Array.isArray(response.step_options) ? response.step_options : [])
-        setRouteSummary(response.summary || '')
-        if (response.warehouse_map_id) {
-          setWarehouseMapId(response.warehouse_map_id)
-        }
-        setNotice('Best route and alternatives received. Use the controls to replay each option.')
-      } else {
-        setRouteOptions([])
-        setSelectedRouteIndex(0)
-        setStepOptions([])
-        setRouteSummary('')
-        setRoutePath([])
-        setRouteDistance(null)
-        setError('The backend returned an unexpected response.')
+      if (response?.status !== 'success' || !Array.isArray(response.robots)) {
+        throw new Error('Unexpected response format from orchestrator.')
       }
+
+      setPlannedRobots(response.robots)
+      setConflictsResolved(Array.isArray(response.conflicts_resolved) ? response.conflicts_resolved : [])
+      setSummary(response.summary || '')
+      setMakespan(response.makespan ?? 0)
+      setCurrentTick(0)
+      setIsAnimating(true)
+      setNotice('Robots are now moving simultaneously to serve selected shelf picks on the shared time axis.')
     } catch (requestError) {
-      setRouteOptions([])
-      setSelectedRouteIndex(0)
-      setStepOptions([])
-      setRouteSummary('')
-      setRoutePath([])
-      setRouteDistance(null)
+      setPlannedRobots([])
+      setConflictsResolved([])
+      setSummary('')
+      setCurrentTick(0)
+      setMakespan(0)
+      setIsAnimating(false)
       setError(
         requestError?.response?.data?.message ||
-          'Unable to reach the backend. Make sure Django is running on port 8000.',
+          requestError.message ||
+          'Unable to compute multi-robot orchestration.',
       )
     } finally {
       setLoading(false)
     }
   }
 
-  const selectRouteOption = (nextIndex) => {
-    if (nextIndex < 0 || nextIndex >= routeOptions.length) {
+  const replayAnimation = () => {
+    if (!plannedRobots.length) {
       return
     }
 
-    const selectedOption = routeOptions[nextIndex]
-    setSelectedRouteIndex(nextIndex)
-    setRoutePath(Array.isArray(selectedOption?.path) ? selectedOption.path : [])
-    setRouteDistance(selectedOption?.distance ?? null)
-
-    if (selectedOption?.is_best) {
-      setNotice('Showing the globally best path.')
-    } else {
-      setNotice(`Showing alternative route #${nextIndex + 1}.`)
-    }
+    setCurrentTick(0)
+    setIsAnimating(true)
   }
 
   return (
@@ -313,23 +438,25 @@ function WarehouseGrid() {
       <div className="warehouse-shell">
         <header className="warehouse-header">
           <div>
-            <p className="eyebrow">Warehouse route optimizer</p>
-            <h1>Step-by-step picking planner</h1>
+            <p className="eyebrow">Multi-agent spatiotemporal orchestrator</p>
+            <h1>Priority auctions with collision-free robot motion</h1>
             <p>
-              First define your warehouse structure. After that, click shelves to pick targets and run the route.
+              Define a warehouse map, register robots with priorities and stop lists, and watch simultaneous movement over
+              shared time steps.
             </p>
           </div>
           <div className="status-card">
             <strong>Live status</strong>
             <p>{notice}</p>
-            {routeDistance !== null ? <p>Last route distance: {routeDistance}</p> : null}
+            {plannedRobots.length ? <p>Current tick: {currentTick}</p> : null}
+            {plannedRobots.length ? <p>Makespan: {makespan}</p> : null}
           </div>
         </header>
 
         {!isConfigured ? (
           <section className="setup-card">
             <h2>Step 1: Configure warehouse</h2>
-            <p>Tell the app how many aisles and shelves you have.</p>
+            <p>Set aisle and shelf dimensions before planning robot traffic.</p>
 
             <div className="form-grid">
               <label>
@@ -342,7 +469,6 @@ function WarehouseGrid() {
                   onChange={(event) => setAisleCountInput(event.target.value)}
                 />
               </label>
-
               <label>
                 Shelves per aisle
                 <input
@@ -355,8 +481,8 @@ function WarehouseGrid() {
               </label>
             </div>
 
-            <button type="button" className="primary-button" onClick={buildWarehouse}>
-              Generate Warehouse
+            <button type="button" className="primary-button" onClick={buildWarehouse} disabled={loading}>
+              {loading ? 'Generating...' : 'Generate Warehouse'}
             </button>
 
             {error ? <p className="error-box">{error}</p> : null}
@@ -364,94 +490,220 @@ function WarehouseGrid() {
         ) : (
           <section className="main-grid">
             <aside className="panel">
-              <h2>Step 2: Select picking shelves</h2>
-              <p>
-                Layout: {aisleCount} aisle(s), {shelvesPerAisle} shelf slot(s) per aisle.
-              </p>
-              <p>
-                Map ID: {warehouseMapId ?? 'local-only'}
-              </p>
+              <h2>Step 2: Define robots and shelf picks</h2>
+              <p>Map ID: {warehouseMapId ?? 'local-only'}</p>
+
+              <div className="step-options-card">
+                <strong>How this system works</strong>
+                <div className="step-options-list">
+                  <div className="step-option-item">
+                    <p>1. Build a warehouse with aisle rows and shelf rows.</p>
+                    <p className="step-option-values">Shelves are stock locations, floor cells are movement lanes.</p>
+                  </div>
+                  <div className="step-option-item">
+                    <p>2. Configure robots, set priorities, and choose each robot.</p>
+                    <p className="step-option-values">Higher priority robots usually keep shorter detours in conflicts.</p>
+                  </div>
+                  <div className="step-option-item">
+                    <p>3. Pick mode:</p>
+                    <p className="step-option-values">Set Start mode: click floor to place start. Pick Shelves mode: click shelf cells to add/remove stock picks.</p>
+                  </div>
+                  <div className="step-option-item">
+                    <p>4. Run orchestration.</p>
+                    <p className="step-option-values">Planner computes collision-free, time-synchronized paths and logs conflict resolutions.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="route-options-card">
+                <strong>Options</strong>
+                <p>Selected robot: {activeRobotId || 'None'}</p>
+                <div className="route-option-actions">
+                  <button
+                    type="button"
+                    className={`secondary-button route-switch ${gridClickMode === 'start' ? 'route-switch-active' : ''}`}
+                    onClick={() => setGridClickMode('start')}
+                  >
+                    Set Start
+                  </button>
+                  <button
+                    type="button"
+                    className={`secondary-button route-switch ${gridClickMode === 'stop' ? 'route-switch-active' : ''}`}
+                    onClick={() => setGridClickMode('stop')}
+                  >
+                    Pick Shelves
+                  </button>
+                </div>
+                <p className="route-summary">
+                  {gridClickMode === 'start'
+                    ? 'Click any floor cell in the grid to set the selected robot start.'
+                    : 'Click shelf cells in the grid to add/remove pickup shelves for the selected robot.'}
+                </p>
+              </div>
 
               <div className="legend-row">
                 <span className="badge floor">Floor</span>
                 <span className="badge shelf">Shelf</span>
-                <span className="badge start">Start</span>
-                <span className="badge target">Target</span>
-                <span className="badge path">Path</span>
+                <span className="badge goal">Goal</span>
+                <span className="badge stop">Shelf Pick</span>
+                <span className="badge robot">Robot</span>
+                <span className="badge yielding">Yielding</span>
               </div>
 
-              <button
-                type="button"
-                className="primary-button"
-                onClick={calculateRoute}
-                disabled={loading}
-              >
-                {loading ? 'Calculating...' : 'Calculate Optimal Route'}
+              <div className="robot-editor-list">
+                {robotDrafts.map((robot, index) => (
+                  <div
+                    key={`robot-editor-${index}`}
+                    className={`robot-editor-card ${selectedRobotIndex === index ? 'robot-editor-card-active' : ''}`}
+                  >
+                    <div className="robot-editor-header">
+                      <strong>Robot {index + 1}</strong>
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => setSelectedRobotIndex(index)}
+                      >
+                        {selectedRobotIndex === index ? 'Selected' : 'Select'}
+                      </button>
+                      {robotDrafts.length > 2 ? (
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => removeRobotDraft(index)}
+                        >
+                          Remove
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="robot-editor-grid">
+                      <label>
+                        ID
+                        <input
+                          type="text"
+                          value={robot.id}
+                          onChange={(event) => updateRobotDraft(index, 'id', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Priority
+                        <input
+                          type="number"
+                          min="1"
+                          max="10"
+                          value={robot.priority}
+                          onChange={(event) => updateRobotDraft(index, 'priority', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Start row
+                        <input
+                          type="number"
+                          min="0"
+                          value={robot.startRow}
+                          onChange={(event) => updateRobotDraft(index, 'startRow', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Start col
+                        <input
+                          type="number"
+                          min="0"
+                          value={robot.startCol}
+                          onChange={(event) => updateRobotDraft(index, 'startCol', event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Selected shelf picks: {Array.isArray(robot.stops) ? robot.stops.length : 0}
+                        <div className="picked-items">
+                          {Array.isArray(robot.stops) && robot.stops.length ? (
+                            robot.stops.map((stop, stopIndex) => (
+                              <span key={`stop-${index}-${stopIndex}`}>[{stop[0]}, {stop[1]}]</span>
+                            ))
+                          ) : (
+                            <span className="muted">No shelf picks selected yet</span>
+                          )}
+                        </div>
+                      </label>
+                      <label>
+                        Actions
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => updateRobotDraft(index, 'stops', [])}
+                        >
+                          Clear Picks
+                        </button>
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <button type="button" className="secondary-button" onClick={addRobotDraft}>
+                Add robot
+              </button>
+
+              <button type="button" className="primary-button" onClick={planRoutes} disabled={loading}>
+                {loading ? 'Orchestrating...' : 'Run Multi-Robot Orchestration'}
+              </button>
+
+              <button type="button" className="secondary-button" onClick={replayAnimation}>
+                Replay animation
               </button>
 
               <button type="button" className="secondary-button" onClick={resetWarehouse}>
                 Reconfigure Warehouse
               </button>
 
-              <div className="picking-card">
-                <strong>Picking list</strong>
-                <p>{selectedTargetLabel}</p>
-                <div className="picked-items">
-                  {pickingList.length ? (
-                    pickingList.map(([row, col]) => <span key={`${row}-${col}`}>({row}, {col})</span>)
-                  ) : (
-                    <span className="muted">No shelves selected yet.</span>
-                  )}
-                </div>
-              </div>
+              {summary ? <p className="route-summary">{summary}</p> : null}
 
-              {routeOptions.length ? (
-                <div className="route-options-card">
-                  <strong>Route options</strong>
-                  <p>
-                    Viewing route #{selectedRouteIndex + 1} of {routeOptions.length}.
-                  </p>
-                  {routeSummary ? <p className="route-summary">{routeSummary}</p> : null}
-                  <div className="route-option-actions">
-                    <button
-                      type="button"
-                      className="secondary-button route-switch"
-                      onClick={() => selectRouteOption(selectedRouteIndex - 1)}
-                      disabled={selectedRouteIndex === 0}
+              {robotStateRows.length ? (
+                <div className="state-list">
+                  <strong>Robot states</strong>
+                  {robotStateRows.map((robot) => (
+                    <div
+                      key={`robot-state-${robot.id}`}
+                      className={`state-chip ${robot.flash ? 'state-chip-flash' : ''}`}
                     >
-                      Previous option
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button route-switch"
-                      onClick={() => selectRouteOption(selectedRouteIndex + 1)}
-                      disabled={selectedRouteIndex >= routeOptions.length - 1}
-                    >
-                      Next option
-                    </button>
+                      <span>{robot.id}</span>
+                      <span>P{robot.priority}</span>
+                      <span>{robot.state}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {plannedRobots.length ? (
+                <div className="picking-card">
+                  <strong>Stock pickup details</strong>
+                  <p>Each shelf stop is served when the robot reaches an adjacent floor cell.</p>
+                  <div className="step-options-list">
+                    {plannedRobots.map((robot) => (
+                      <div key={`served-${robot.id}`} className="step-option-item">
+                        <p>
+                          {robot.id} requested: {JSON.stringify(robot.stops || [])}
+                        </p>
+                        <p className="step-option-values">
+                          serviced from: {JSON.stringify(robot.serviced_from || [])}
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 </div>
               ) : null}
 
-              {stepOptions.length ? (
+              {conflictsResolved.length ? (
                 <div className="step-options-card">
-                  <strong>Step-by-step alternatives (best path)</strong>
+                  <strong>Conflict log</strong>
                   <div className="step-options-list">
-                    {stepOptions.map((step) => (
-                      <div key={`step-option-${step.step_index}`} className="step-option-item">
+                    {conflictsResolved.slice(0, 10).map((entry, index) => (
+                      <div key={`conflict-${index}`} className="step-option-item">
                         <p>
-                          Step {step.step_index} at ({step.at[0]}, {step.at[1]})
+                          t={entry.time} | {entry.type} conflict | yielded: {entry.yielded_robot}
                         </p>
                         <p className="step-option-values">
-                          {step.alternatives.length
-                            ? step.alternatives
-                                .slice(0, 4)
-                                .map((option) => {
-                                  const marker = option.is_best_step ? 'best' : 'alt'
-                                  return `${marker}: (${option.next[0]}, ${option.next[1]}) -> ${option.estimated_total_distance}`
-                                })
-                                .join(' | ')
-                            : 'No alternatives available'}
+                          {entry.robots?.join(' vs ')} | detour: {JSON.stringify(entry.detour_costs)}
                         </p>
                       </div>
                     ))}
@@ -464,33 +716,50 @@ function WarehouseGrid() {
 
             <section className="grid-card">
               <div className="grid-title">
-                <h2>Dynamic warehouse grid</h2>
-                <span>
-                  {routePath.length ? `${revealedSteps}/${routePath.length} steps shown` : 'Route idle'}
-                </span>
+                <h2>Spatiotemporal grid playback</h2>
+                <span>{plannedRobots.length ? `t = ${currentTick}` : 'Idle'}</span>
               </div>
 
               <div
                 className="warehouse-grid"
-                style={{ gridTemplateColumns: `repeat(${displayLayout[0]?.length ?? 1}, 1fr)` }}
+                style={{ gridTemplateColumns: `repeat(${baseLayout[0]?.length ?? 1}, 1fr)` }}
               >
-                {displayLayout.map((row, rowIndex) =>
+                {baseLayout.map((row, rowIndex) =>
                   row.map((cellType, colIndex) => {
                     const key = getCellKey(rowIndex, colIndex)
-                    const visitCount = pathVisitMeta.countByCell.get(key) ?? 0
-                    const isCurrentStep = pathVisitMeta.currentStepKey === key
+                    const robotsHere = robotPositionsByCell.get(key) || []
+                    const hasGoal = robotGoals.has(key)
+                    const stopMarkers = draftStopsByCell.get(key) || []
+                    const hasStop = stopMarkers.length > 0
+                    const hasActiveStop = isActiveRobotStop(rowIndex, colIndex)
+                    const isSelectable =
+                      (gridClickMode === 'start' && cellType !== 1) ||
+                      (gridClickMode === 'stop' && cellType === 1)
 
                     return (
-                      <button
-                        type="button"
-                        key={`${rowIndex}-${colIndex}`}
-                        className={getCellClassName(cellType, isCurrentStep, visitCount)}
-                        onClick={() => toggleTargetCell(rowIndex, colIndex)}
-                        aria-label={`Cell ${rowIndex}, ${colIndex}`}
+                      <div
+                        key={key}
+                        className={getCellClassName(
+                          cellType,
+                          hasGoal,
+                          hasStop,
+                          hasActiveStop,
+                          isSelectable,
+                        )}
                         title={`(${rowIndex}, ${colIndex})`}
+                        onClick={() => onGridCellClick(rowIndex, colIndex, cellType)}
                       >
-                        {cellType === 2 ? 'S' : ''}
-                      </button>
+                        {hasStop ? (
+                          <span className="stop-marker" title={stopMarkers.map((x) => x.robotId).join(', ')}>
+                            {stopMarkers.length}
+                          </span>
+                        ) : null}
+                        {robotsHere.map((robotId) => (
+                          <span key={`${key}-${robotId}`} className="robot-token">
+                            {robotId}
+                          </span>
+                        ))}
+                      </div>
                     )
                   }),
                 )}

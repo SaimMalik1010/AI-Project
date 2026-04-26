@@ -182,6 +182,81 @@
   color: #fff1f2;
 }
 
+.badge.goal {
+  background: #854d0e;
+  color: #fef9c3;
+}
+
+.badge.stop {
+  background: #115e59;
+  color: #ccfbf1;
+}
+
+.badge.robot {
+  background: #4c1d95;
+  color: #f3e8ff;
+}
+
+.badge.yielding {
+  background: #9f1239;
+  color: #ffe4e6;
+}
+
+.robot-editor-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.robot-editor-card {
+  border: 1px solid rgba(71, 85, 105, 0.65);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.7);
+  padding: 10px;
+}
+
+.robot-editor-card-active {
+  border-color: rgba(56, 189, 248, 0.9);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
+}
+
+.robot-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.text-button {
+  border: none;
+  background: transparent;
+  color: #7dd3fc;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.robot-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.robot-editor-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.robot-editor-grid input {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 8px;
+}
+
 .picking-card {
   margin-top: 12px;
   border: 1px solid #334155;
@@ -248,6 +323,12 @@
   padding: 9px 10px;
 }
 
+.route-switch-active {
+  border-color: rgba(56, 189, 248, 0.9);
+  color: #e0f2fe;
+  background: rgba(8, 47, 73, 0.75);
+}
+
 .step-options-list {
   max-height: 200px;
   overflow: auto;
@@ -269,6 +350,29 @@
 .step-option-values {
   color: #bae6fd;
   font-size: 0.78rem;
+}
+
+.state-list {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.state-chip {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  border: 1px solid rgba(71, 85, 105, 0.65);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(15, 23, 42, 0.7);
+  font-size: 0.82rem;
+}
+
+.state-chip-flash {
+  border-color: rgba(244, 63, 94, 0.75);
+  box-shadow: 0 0 12px rgba(244, 63, 94, 0.45);
+  animation: pulse-yield 0.55s ease-in-out infinite alternate;
 }
 
 .grid-card {
@@ -315,6 +419,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  position: relative;
 }
 
 .cell-floor {
@@ -326,52 +431,70 @@
 .cell-shelf {
   background: #9a3412;
   border-color: #c2410c;
-  cursor: pointer;
-}
-
-.cell-shelf:hover {
-  background: #c2410c;
-}
-
-.cell-start {
-  background: #0284c7;
-  border-color: #7dd3fc;
-  box-shadow: 0 0 14px rgba(2, 132, 199, 0.45);
   cursor: default;
 }
 
-.cell-target {
-  background: #059669;
-  border-color: #34d399;
-  box-shadow: 0 0 12px rgba(5, 150, 105, 0.4);
+.cell-goal {
+  background: #78350f;
+  border-color: #d97706;
+}
+
+.cell-stop {
+  box-shadow: inset 0 0 0 2px rgba(13, 148, 136, 0.85);
+}
+
+.cell-active-stop {
+  box-shadow: inset 0 0 0 2px rgba(14, 165, 233, 0.95), 0 0 10px rgba(14, 165, 233, 0.4);
+}
+
+.cell-selectable {
   cursor: pointer;
 }
 
-.cell-path {
-  background: #e11d48;
-  border-color: #fb7185;
-  box-shadow: 0 0 10px rgba(225, 29, 72, 0.35);
-  cursor: default;
+.cell-selectable:hover {
+  filter: brightness(1.08);
 }
 
-.cell-path-1 {
-  background: #e11d48;
-  border-color: #fb7185;
+.stop-marker {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  min-width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: #14b8a6;
+  color: #042f2e;
+  border: 1px solid rgba(204, 251, 241, 0.9);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1;
 }
 
-.cell-path-2 {
-  background: #be123c;
-  border-color: #f43f5e;
+.robot-token {
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  padding: 0 6px;
+  background: linear-gradient(135deg, #4f46e5, #9333ea);
+  border: 1px solid rgba(224, 231, 255, 0.7);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.62rem;
+  line-height: 1;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.45);
 }
 
-.cell-path-3 {
-  background: #881337;
-  border-color: #e11d48;
-}
-
-.cell-path-current {
-  transform: scale(1.08);
-  box-shadow: 0 0 18px rgba(244, 63, 94, 0.7);
+@keyframes pulse-yield {
+  from {
+    transform: scale(1);
+  }
+  to {
+    transform: scale(1.02);
+  }
 }
 
 .error-box {
@@ -396,6 +519,10 @@
 @media (max-width: 640px) {
   .warehouse-page {
     padding: 12px;
+  }
+
+  .robot-editor-grid {
+    grid-template-columns: 1fr;
   }
 
   .warehouse-shell {

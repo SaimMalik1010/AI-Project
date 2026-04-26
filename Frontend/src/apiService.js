@@ -29,16 +29,21 @@ export const listWarehouseMaps = async () => {
 }
 
 export const getOptimalRoute = async ({
+  robots = null,
   pickingList,
   start = [0, 0],
   warehouseMapId = null,
   grid = null,
   maxAlternatives = 6,
 }) => {
-  const payload = {
-    start,
-    targets: pickingList,
-    max_alternatives: maxAlternatives,
+  const payload = {}
+
+  if (Array.isArray(robots) && robots.length) {
+    payload.robots = robots
+  } else {
+    payload.start = start
+    payload.targets = pickingList
+    payload.max_alternatives = maxAlternatives
   }
 
   if (warehouseMapId !== null && warehouseMapId !== undefined) {

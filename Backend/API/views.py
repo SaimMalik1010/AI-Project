@@ -4,7 +4,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from .models import PickingSession, WarehouseMap
-from .pathfinding import calculate_route_with_alternatives, validate_route_safety
+from .pathfinding import (
+	calculate_route_with_alternatives,
+	orchestrate_multi_robot_routes,
+	validate_route_safety,
+)
 
 
 def _serialize_map(warehouse_map):
@@ -79,21 +83,10 @@ def get_warehouse_map(request, map_id):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def get_route(request):
-	start = request.data.get("start", [0, 0])
-	targets = request.data.get("targets") or request.data.get("pickingList") or []
-	max_alternatives = request.data.get("max_alternatives", 5)
+	robots_payload = request.data.get("robots")
 	warehouse_map_id = request.data.get("warehouse_map_id")
 	grid = request.data.get("grid")
 	warehouse_map = None
-
-	if not isinstance(targets, list):
-		return Response(
-			{
-				"status": "error",
-				"message": "targets must be a list of [x, y] coordinates.",
-			},
-			status=status.HTTP_400_BAD_REQUEST,
-		)
 
 	if warehouse_map_id is not None:
 		warehouse_map = WarehouseMap.objects.filter(pk=warehouse_map_id).first()
@@ -119,6 +112,41 @@ def get_route(request):
 	if any(not isinstance(row, list) or len(row) != cols for row in grid):
 		return Response(
 			{"status": "error", "message": "grid rows must have equal length."},
+			status=status.HTTP_400_BAD_REQUEST,
+		)
+
+	if robots_payload is not None:
+		try:
+			result = orchestrate_multi_robot_routes(grid, robots_payload)
+		except ValueError as exc:
+			return Response(
+				{"status": "error", "message": str(exc)},
+				status=status.HTTP_400_BAD_REQUEST,
+			)
+
+		for robot in result.get("robots", []):
+			PickingSession.objects.create(
+				warehouse_map=warehouse_map,
+				start_point=robot.get("start", []),
+				targets=robot.get("stops") or [robot.get("goal", [])],
+				request_payload={"robots": robots_payload},
+				path=robot.get("path", []),
+				distance=robot.get("distance", 0),
+			)
+
+		result["warehouse_map_id"] = warehouse_map.id if warehouse_map else None
+		return Response(result)
+
+	start = request.data.get("start", [0, 0])
+	targets = request.data.get("targets") or request.data.get("pickingList") or []
+	max_alternatives = request.data.get("max_alternatives", 5)
+
+	if not isinstance(targets, list):
+		return Response(
+			{
+				"status": "error",
+				"message": "targets must be a list of [x, y] coordinates.",
+			},
 			status=status.HTTP_400_BAD_REQUEST,
 		)
 
