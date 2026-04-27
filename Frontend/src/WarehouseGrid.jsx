@@ -56,11 +56,16 @@ function WarehouseGrid() {
   const [makespan, setMakespan] = useState(0)
   const [currentTick, setCurrentTick] = useState(0)
   const [isAnimating, setIsAnimating] = useState(false)
+  const [routeComparison, setRouteComparison] = useState({})
   const [loading, setLoading] = useState(false)
+  const [comparisonLoading, setComparisonLoading] = useState(false)
   const [notice, setNotice] = useState('Configure aisles and shelves, then set starts and shelf picks by clicking cells.')
   const [error, setError] = useState('')
   const [selectedRobotIndex, setSelectedRobotIndex] = useState(0)
   const [gridClickMode, setGridClickMode] = useState('stop')
+  const [routingAlgorithm, setRoutingAlgorithm] = useState('A*')
+
+  const comparisonAlgorithms = ['A*', 'Greedy Best-First Search', 'Floyd-Warshall']
 
   useEffect(() => {
     if (!plannedRobots.length || !isAnimating) {
@@ -220,6 +225,45 @@ function WarehouseGrid() {
       }
     })
   }, [plannedRobots, currentTick])
+
+  const selectedComparisonResult = routeComparison[routingAlgorithm] || null
+
+  const routeComparisonRows = useMemo(() => {
+    const rows = comparisonAlgorithms
+      .map((algorithm) => {
+        const result = routeComparison[algorithm]
+        if (!result) {
+          return null
+        }
+
+        return {
+          algorithm,
+          distance: result.distance ?? 0,
+          pathLength: Array.isArray(result.path) ? result.path.length : 0,
+          summary: result.summary || '',
+        }
+      })
+      .filter(Boolean)
+
+    const ranked = [...rows].sort((left, right) => {
+      if (left.distance !== right.distance) {
+        return left.distance - right.distance
+      }
+      return left.pathLength - right.pathLength
+    })
+
+    const bestAlgorithm = ranked[0]?.algorithm || ''
+
+    return rows.map((row) => ({
+      ...row,
+      isBest: row.algorithm === bestAlgorithm,
+    }))
+  }, [routeComparison])
+
+  const comparisonPathPreview = useMemo(() => {
+    const path = selectedComparisonResult?.path
+    return Array.isArray(path) ? path : []
+  }, [selectedComparisonResult])
 
   const buildWarehouse = async () => {
     const parsedAisles = Number.parseInt(aisleCountInput, 10)
@@ -387,6 +431,7 @@ function WarehouseGrid() {
 
     setLoading(true)
     setError('')
+    setComparisonLoading(true)
 
     try {
       const normalizedRobots = normalizeRobots()
@@ -395,6 +440,46 @@ function WarehouseGrid() {
         warehouseMapId,
         grid: warehouseMapId ? null : baseLayout,
       })
+
+      const comparisonRobot = normalizedRobots[selectedRobotIndex] || normalizedRobots[0]
+      if (comparisonRobot) {
+        const comparisonPayload = {
+          start: comparisonRobot.start,
+          pickingList: comparisonRobot.stops,
+          warehouseMapId,
+          grid: warehouseMapId ? null : baseLayout,
+          maxAlternatives: 6,
+        }
+
+        const comparisonResults = await Promise.allSettled(
+          comparisonAlgorithms.map(async (algorithm) => {
+            const routeResponse = await getOptimalRoute({
+              ...comparisonPayload,
+              algorithm,
+            })
+
+            return [algorithm, routeResponse]
+          }),
+        )
+
+        const comparisonMap = {}
+        comparisonResults.forEach((entry, index) => {
+          if (entry.status === 'fulfilled') {
+            const [algorithm, routeResponse] = entry.value
+            comparisonMap[algorithm] = routeResponse
+            return
+          }
+
+          comparisonMap[comparisonAlgorithms[index]] = {
+            algorithm: comparisonAlgorithms[index],
+            distance: 0,
+            path: [],
+            summary: 'Comparison failed for this algorithm.',
+          }
+        })
+
+        setRouteComparison(comparisonMap)
+      }
 
       if (response?.status !== 'success' || !Array.isArray(response.robots)) {
         throw new Error('Unexpected response format from orchestrator.')
@@ -406,7 +491,7 @@ function WarehouseGrid() {
       setMakespan(response.makespan ?? 0)
       setCurrentTick(0)
       setIsAnimating(true)
-      setNotice('Robots are now moving simultaneously to serve selected shelf picks on the shared time axis.')
+      setNotice('Multi-robot orchestration is ready. The algorithm comparison panel is available below.')
     } catch (requestError) {
       setPlannedRobots([])
       setConflictsResolved([])
@@ -414,6 +499,7 @@ function WarehouseGrid() {
       setCurrentTick(0)
       setMakespan(0)
       setIsAnimating(false)
+      setRouteComparison({})
       setError(
         requestError?.response?.data?.message ||
           requestError.message ||
@@ -421,6 +507,7 @@ function WarehouseGrid() {
       )
     } finally {
       setLoading(false)
+      setComparisonLoading(false)
     }
   }
 
@@ -518,28 +605,65 @@ function WarehouseGrid() {
               <div className="route-options-card">
                 <strong>Options</strong>
                 <p>Selected robot: {activeRobotId || 'None'}</p>
-                <div className="route-option-actions">
-                  <button
-                    type="button"
-                    className={`secondary-button route-switch ${gridClickMode === 'start' ? 'route-switch-active' : ''}`}
-                    onClick={() => setGridClickMode('start')}
-                  >
-                    Set Start
-                  </button>
-                  <button
-                    type="button"
-                    className={`secondary-button route-switch ${gridClickMode === 'stop' ? 'route-switch-active' : ''}`}
-                    onClick={() => setGridClickMode('stop')}
-                  >
-                    Pick Shelves
-                  </button>
-                </div>
+                <label className="algorithm-picker">
+                  Compare algorithm
+                  <select value={routingAlgorithm} onChange={(event) => setRoutingAlgorithm(event.target.value)}>
+                    <option value="A*">A*</option>
+                    <option value="Greedy Best-First Search">Greedy Best-First Search</option>
+                    <option value="Floyd-Warshall">Floyd-Warshall</option>
+                  </select>
+                </label>
                 <p className="route-summary">
-                  {gridClickMode === 'start'
-                    ? 'Click any floor cell in the grid to set the selected robot start.'
-                    : 'Click shelf cells in the grid to add/remove pickup shelves for the selected robot.'}
+                  {selectedComparisonResult
+                    ? 'Switch the selector below to compare how each algorithm routes the selected robot.'
+                    : 'Run orchestration once to load the algorithm comparison table.'}
                 </p>
               </div>
+
+              <div className="route-options-card">
+                <strong>Algorithm comparison</strong>
+                <p>
+                  Preview for {activeRobotId || 'the selected robot'}
+                  {comparisonLoading ? ' is loading...' : ''}
+                </p>
+                <div className="route-path-preview" aria-label="path preview">
+                  {comparisonPathPreview.length ? (
+                    comparisonPathPreview.map((cell, index) => (
+                      <span key={`${routingAlgorithm}-${index}`} className="path-chip">
+                        [{cell[0]}, {cell[1]}]
+                      </span>
+                    ))
+                  ) : (
+                    <span className="muted">No comparison path available yet.</span>
+                  )}
+                </div>
+              </div>
+
+              {routeComparisonRows.length ? (
+                <div className="route-options-card">
+                  <strong>Algorithm comparison table</strong>
+                  <table className="comparison-table">
+                    <thead>
+                      <tr>
+                        <th>Algorithm</th>
+                        <th>Distance</th>
+                        <th>Path steps</th>
+                        <th>Verdict</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {routeComparisonRows.map((row) => (
+                        <tr key={row.algorithm} className={row.isBest ? 'comparison-best' : ''}>
+                          <td>{row.algorithm}</td>
+                          <td>{row.distance}</td>
+                          <td>{row.pathLength}</td>
+                          <td>{row.isBest ? 'Best overall' : 'Slower than best'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
 
               <div className="legend-row">
                 <span className="badge floor">Floor</span>

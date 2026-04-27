@@ -35,6 +35,7 @@ export const getOptimalRoute = async ({
   warehouseMapId = null,
   grid = null,
   maxAlternatives = 6,
+  algorithm = 'A*',
 }) => {
   const payload = {}
 
@@ -53,6 +54,8 @@ export const getOptimalRoute = async ({
   if (grid) {
     payload.grid = grid
   }
+
+  payload.algorithm = algorithm
 
   const response = await apiClient.post('/get-route/', {
     ...payload,

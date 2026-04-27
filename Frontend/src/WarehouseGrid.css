@@ -318,6 +318,62 @@
   margin-top: 8px;
 }
 
+.algorithm-picker {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 0.88rem;
+  color: #cbd5e1;
+}
+
+.algorithm-picker select {
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 10px 12px;
+}
+
+.route-path-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.path-chip {
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(8, 47, 73, 0.72);
+  color: #e0f2fe;
+  padding: 4px 8px;
+  font-size: 0.76rem;
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.comparison-table th,
+.comparison-table td {
+  text-align: left;
+  padding: 9px 8px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.8);
+  font-size: 0.85rem;
+}
+
+.comparison-table th {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.comparison-best {
+  background: rgba(16, 185, 129, 0.14);
+}
+
 .route-switch {
   margin-top: 0;
   padding: 9px 10px;

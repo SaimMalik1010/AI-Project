@@ -2,6 +2,9 @@ import heapq
 from collections import defaultdict
 
 
+_FLOYD_CACHE = {}
+
+
 def _is_coord(value):
     return (
         isinstance(value, (list, tuple))
@@ -18,6 +21,20 @@ def _neighbors(row, col, rows, cols):
 
 def _heuristic(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _normalize_algorithm(algorithm):
+    if not isinstance(algorithm, str):
+        return "astar"
+
+    normalized = algorithm.strip().lower().replace("_", " ").replace("-", " ")
+    if normalized in {"astar", "a star", "a*"}:
+        return "astar"
+    if normalized in {"greedy", "greedy best first", "greedy best first search", "gbfs"}:
+        return "greedy"
+    if normalized in {"floyd", "floyd warshall", "floyd warshall algo", "floyd warshall algorithm"}:
+        return "floyd-warshall"
+    return "astar"
 
 
 def _build_walkable_set(grid, goals):
@@ -115,6 +132,139 @@ def _a_star_segment(grid, start, goal, walkable):
     return path
 
 
+def _greedy_best_first_segment(grid, start, goal, walkable):
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+
+    start_node = tuple(start)
+    goal_node = tuple(goal)
+    if start_node not in walkable or goal_node not in walkable:
+        return []
+
+    frontier = [(0, start_node)]
+    came_from = {start_node: None}
+    visited = {start_node}
+
+    while frontier:
+        _, current = heapq.heappop(frontier)
+
+        if current == goal_node:
+            break
+
+        for neighbor in _neighbors(current[0], current[1], rows, cols):
+            if neighbor not in walkable or neighbor in visited:
+                continue
+
+            visited.add(neighbor)
+            came_from[neighbor] = current
+            priority = _heuristic(neighbor, goal_node)
+            heapq.heappush(frontier, (priority, neighbor))
+
+    if goal_node not in came_from:
+        return []
+
+    path = []
+    node = goal_node
+    while node is not None:
+        path.append([node[0], node[1]])
+        node = came_from[node]
+
+    path.reverse()
+    return path
+
+
+def _build_floyd_warshall_bundle(grid, walkable):
+    cache_key = tuple(tuple(row) for row in grid)
+    cached_bundle = _FLOYD_CACHE.get(cache_key)
+    if cached_bundle is not None:
+        return cached_bundle
+
+    nodes = sorted(walkable)
+    index_by_node = {node: index for index, node in enumerate(nodes)}
+    size = len(nodes)
+    infinity = float("inf")
+    distances = [[infinity for _ in range(size)] for _ in range(size)]
+    next_hops = [[None for _ in range(size)] for _ in range(size)]
+
+    for index, node in enumerate(nodes):
+        distances[index][index] = 0
+        next_hops[index][index] = index
+
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    for index, node in enumerate(nodes):
+        row, col = node
+        for next_row, next_col in _neighbors(row, col, rows, cols):
+            neighbor = (next_row, next_col)
+            if neighbor not in index_by_node:
+                continue
+
+            neighbor_index = index_by_node[neighbor]
+            distances[index][neighbor_index] = 1
+            next_hops[index][neighbor_index] = neighbor_index
+
+    for pivot in range(size):
+        for source in range(size):
+            if distances[source][pivot] == infinity:
+                continue
+            for target in range(size):
+                if distances[pivot][target] == infinity:
+                    continue
+
+                candidate_distance = distances[source][pivot] + distances[pivot][target]
+                if candidate_distance < distances[source][target]:
+                    distances[source][target] = candidate_distance
+                    next_hops[source][target] = next_hops[source][pivot]
+
+    bundle = {
+        "nodes": nodes,
+        "index_by_node": index_by_node,
+        "distances": distances,
+        "next_hops": next_hops,
+    }
+    _FLOYD_CACHE[cache_key] = bundle
+    return bundle
+
+
+def _floyd_warshall_segment(grid, start, goal, walkable):
+    start_node = tuple(start)
+    goal_node = tuple(goal)
+    if start_node not in walkable or goal_node not in walkable:
+        return []
+
+    bundle = _build_floyd_warshall_bundle(grid, walkable)
+    index_by_node = bundle["index_by_node"]
+    next_hops = bundle["next_hops"]
+
+    source_index = index_by_node.get(start_node)
+    target_index = index_by_node.get(goal_node)
+    if source_index is None or target_index is None:
+        return []
+
+    if next_hops[source_index][target_index] is None:
+        return []
+
+    path = [[start_node[0], start_node[1]]]
+    current_index = source_index
+    while current_index != target_index:
+        current_index = next_hops[current_index][target_index]
+        if current_index is None:
+            return []
+        node = bundle["nodes"][current_index]
+        path.append([node[0], node[1]])
+
+    return path
+
+
+def _find_segment(grid, start, goal, walkable, algorithm="astar"):
+    normalized = _normalize_algorithm(algorithm)
+    if normalized == "greedy":
+        return _greedy_best_first_segment(grid, start, goal, walkable)
+    if normalized == "floyd-warshall":
+        return _floyd_warshall_segment(grid, start, goal, walkable)
+    return _a_star_segment(grid, start, goal, walkable)
+
+
 def _dedupe_goals(goals):
     seen = set()
     unique = []
@@ -166,7 +316,7 @@ def _build_service_nodes(start, goals, grid, walkable):
     return sorted(service_nodes)
 
 
-def _build_pairwise_segments(grid, service_nodes, walkable, coverage_mask_by_point):
+def _build_pairwise_segments(grid, service_nodes, walkable, coverage_mask_by_point, algorithm="astar"):
     node_count = len(service_nodes)
     segments = [[None for _ in range(node_count)] for _ in range(node_count)]
     distances = [[None for _ in range(node_count)] for _ in range(node_count)]
@@ -181,11 +331,12 @@ def _build_pairwise_segments(grid, service_nodes, walkable, coverage_mask_by_poi
             if source_index == target_index:
                 continue
 
-            segment = _a_star_segment(
+            segment = _find_segment(
                 grid,
                 [source[0], source[1]],
                 [target[0], target[1]],
                 walkable,
+                algorithm=algorithm,
             )
 
             if not segment:
@@ -286,7 +437,7 @@ def _shortest_completion_from_state(start_state, distances, coverage_masks, all_
     return result
 
 
-def _build_globally_optimal_route(grid, start, goals, walkable):
+def _build_globally_optimal_route(grid, start, goals, walkable, algorithm="astar"):
     unique_goals = _dedupe_goals(goals)
     if not unique_goals:
         return [[start[0], start[1]]]
@@ -298,6 +449,7 @@ def _build_globally_optimal_route(grid, start, goals, walkable):
         service_nodes,
         walkable,
         coverage_mask_by_point,
+        algorithm=algorithm,
     )
 
     start_node = tuple(start)
@@ -455,7 +607,7 @@ def _build_route_alternatives(start, best_solution, max_routes):
     return route_options, step_options
 
 
-def calculate_route_with_alternatives(grid, start, goals, max_routes=5):
+def calculate_route_with_alternatives(grid, start, goals, max_routes=5, algorithm="astar"):
     if not isinstance(grid, list) or not grid or not isinstance(grid[0], list):
         raise ValueError("grid must be a 2D list")
 
@@ -470,6 +622,7 @@ def calculate_route_with_alternatives(grid, start, goals, max_routes=5):
     except (TypeError, ValueError):
         max_routes = 5
     max_routes = min(max(max_routes, 1), 25)
+    algorithm = _normalize_algorithm(algorithm)
 
     if not goals:
         return {
@@ -501,7 +654,7 @@ def calculate_route_with_alternatives(grid, start, goals, max_routes=5):
     if tuple(start) not in walkable:
         raise ValueError("start must be on a walkable non-shelf cell")
 
-    best_solution = _build_globally_optimal_route(grid, start, goals, walkable)
+    best_solution = _build_globally_optimal_route(grid, start, goals, walkable, algorithm=algorithm)
     route_options, step_options = _build_route_alternatives(start, best_solution, max_routes)
 
     for option in route_options:
@@ -509,7 +662,7 @@ def calculate_route_with_alternatives(grid, start, goals, max_routes=5):
 
     best_distance = route_options[0]["distance"]
     summary = (
-        f"Route #1 is globally optimal with distance {best_distance}. "
+        f"Route #1 is globally optimal with distance {best_distance} using {algorithm}. "
         f"Returned {len(route_options)} ranked route option(s)."
     )
 

@@ -11,6 +11,18 @@ from .pathfinding import (
 )
 
 
+def _normalize_algorithm_label(value):
+	if not isinstance(value, str):
+		return "A*"
+
+	normalized = value.strip().lower().replace("_", " ").replace("-", " ")
+	if normalized in {"greedy", "greedy best first", "greedy best first search", "gbfs"}:
+		return "Greedy Best-First Search"
+	if normalized in {"floyd", "floyd warshall", "floyd warshall algo", "floyd warshall algorithm"}:
+		return "Floyd-Warshall"
+	return "A*"
+
+
 def _serialize_map(warehouse_map):
 	return {
 		"id": warehouse_map.id,
@@ -86,7 +98,9 @@ def get_route(request):
 	robots_payload = request.data.get("robots")
 	warehouse_map_id = request.data.get("warehouse_map_id")
 	grid = request.data.get("grid")
+	algorithm = request.data.get("algorithm", "A*")
 	warehouse_map = None
+	algorithm_label = _normalize_algorithm_label(algorithm)
 
 	if warehouse_map_id is not None:
 		warehouse_map = WarehouseMap.objects.filter(pk=warehouse_map_id).first()
@@ -135,6 +149,8 @@ def get_route(request):
 			)
 
 		result["warehouse_map_id"] = warehouse_map.id if warehouse_map else None
+		result["algorithm"] = algorithm_label
+		result["summary"] = f"Game-theory-inspired multi-robot planning completed using {algorithm_label}. " + result.get("summary", "")
 		return Response(result)
 
 	start = request.data.get("start", [0, 0])
@@ -196,6 +212,7 @@ def get_route(request):
 			start,
 			targets,
 			max_routes=max_alternatives,
+			algorithm=algorithm,
 		)
 		path = route_result["path"]
 		distance = route_result["distance"]
@@ -229,6 +246,7 @@ def get_route(request):
 			"route_options": route_result["route_options"],
 			"step_options": route_result["step_options"],
 			"summary": route_result["summary"],
+			"algorithm": algorithm_label,
 			"warehouse_map_id": warehouse_map.id if warehouse_map else None,
 		}
 	)
