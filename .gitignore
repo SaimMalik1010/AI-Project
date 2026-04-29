@@ -1,0 +1,67 @@
+# =========================
+# Node.js (High Priority)
+# =========================
+node_modules/
+**/node_modules/
+
+# Frontend build artifacts
+Frontend/dist/
+Frontend/.vite/
+
+# npm/yarn/pnpm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Python / Django
+# =========================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Django / local runtime files
+*.sqlite3
+Backend/db.sqlite3
+staticfiles/
+media/
+
+# =========================
+# Environment and secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =========================
+# Misc
+# =========================
+*.log
+*.tmp
+*.temp
